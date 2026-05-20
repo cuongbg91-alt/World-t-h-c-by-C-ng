@@ -1,4 +1,4 @@
-import { FileUp, Download, ScrollText, CheckSquare, ShieldCheck } from "lucide-react";
+import { FileUp, Download, ScrollText, CheckSquare, ShieldCheck, Clipboard } from "lucide-react";
 import React from "react";
 
 interface ToolbarProps {
@@ -6,9 +6,10 @@ interface ToolbarProps {
   onDownload: () => void;
   onSetMode: (mode: string) => void;
   currentMode: string;
+  onPasteClick: () => void;
 }
 
-export default function Toolbar({ onUpload, onDownload, onSetMode, currentMode }: ToolbarProps) {
+export default function Toolbar({ onUpload, onDownload, onSetMode, currentMode, onPasteClick }: ToolbarProps) {
   const modes = [
     { id: "nd30-report", label: "Báo cáo NĐ 30", icon: <ScrollText className="w-4 h-4 mr-2" /> },
     { id: "nd30-decision", label: "Quyết định NĐ 30", icon: <CheckSquare className="w-4 h-4 mr-2" /> },
@@ -43,6 +44,13 @@ export default function Toolbar({ onUpload, onDownload, onSetMode, currentMode }
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={onPasteClick}
+            className="flex items-center px-4 py-2 bg-white text-brand-text border border-brand-border rounded-md hover:bg-brand-bg cursor-pointer transition-all text-[13px] font-medium"
+          >
+            <Clipboard className="w-4 h-4 mr-2" />
+            Dán văn bản
+          </button>
           <label className="flex items-center px-4 py-2 bg-white text-brand-text border border-brand-border rounded-md hover:bg-brand-bg cursor-pointer transition-all text-[13px] font-medium">
             <FileUp className="w-4 h-4 mr-2" />
             Tải tệp lên

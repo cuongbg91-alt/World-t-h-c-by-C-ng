@@ -65,7 +65,15 @@ function trimTrailingWhitespacesFromHTML(html: string): string {
   }
 }
 
-export default function TextView({ htmlContent, errors, highlightedError }: TextViewProps) {
+interface TextViewProps {
+  htmlContent: string;
+  errors: ErrorItem[];
+  highlightedError: ErrorItem | null;
+  orientation: "portrait" | "landscape";
+  onOrientationChange: (orientation: "portrait" | "landscape") => void;
+}
+
+export default function TextView({ htmlContent, errors, highlightedError, orientation, onOrientationChange }: TextViewProps) {
   const contentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -114,22 +122,29 @@ export default function TextView({ htmlContent, errors, highlightedError }: Text
   }, [htmlContent, errors]);
 
   return (
-    <div className="flex-1 bg-[#cbd5e1] overflow-auto p-12 flex justify-center shadow-inner animate-fade-in">
-      <div className="w-[210mm] min-h-[297mm] bg-white shadow-2xl p-[25mm] font-['Times_New_Roman',serif] text-[#111111] leading-[1.6] relative transition-all" id="word-content">
-        {!htmlContent ? (
-          <div className="h-full flex flex-col items-center justify-center text-slate-400 mt-40">
-            <div className="w-24 h-24 border-2 border-dashed border-slate-300 rounded-2xl flex items-center justify-center mb-6 bg-slate-50">
-              <span className="text-5xl opacity-40">📄</span>
+    <div className="flex-1 flex flex-col bg-[#cbd5e1] overflow-hidden">
+      <div className="flex-1 overflow-auto p-12 flex justify-center shadow-inner animate-fade-in">
+        <div 
+          className={`${
+            orientation === "landscape" ? "w-[297mm] min-h-[210mm]" : "w-[210mm] min-h-[297mm]"
+          } bg-white shadow-2xl pt-[20mm] pb-[20mm] pl-[30mm] pr-[20mm] font-['Times_New_Roman',serif] text-[#111111] leading-[1.6] relative transition-all`} 
+          id="word-content"
+        >
+          {!htmlContent ? (
+            <div className="h-full flex flex-col items-center justify-center text-slate-400 mt-40">
+              <div className="w-24 h-24 border-2 border-dashed border-slate-300 rounded-2xl flex items-center justify-center mb-6 bg-slate-50">
+                <span className="text-5xl opacity-40">📄</span>
+              </div>
+              <p className="text-sm font-medium">Tải tệp tin DOCX để rà soát</p>
             </div>
-            <p className="text-sm font-medium">Tải tệp tin DOCX để rà soát</p>
-          </div>
-        ) : (
-          <div 
-            ref={contentRef}
-            dangerouslySetInnerHTML={{ __html: processedHtml }} 
-            className="word-render"
-          />
-        )}
+          ) : (
+            <div 
+              ref={contentRef}
+              dangerouslySetInnerHTML={{ __html: processedHtml }} 
+              className="word-render"
+            />
+          )}
+        </div>
       </div>
       
       <style>{`

@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import express from "express";
 import fs from "fs/promises";
@@ -34,12 +34,12 @@ const ai = new GoogleGenAI({
 // Hàm hỗ trợ gọi Gemini với cơ chế thử lại và chuyển đổi mô hình dự phòng khi gặp lỗi
 async function generateContentWithRetryAndFallback(prompt: string): Promise<string> {
   const modelsToTry = [
-    "gemini-2.5-flash",      // Mô hình chuẩn vàng: Cực kỳ ổn định, hỗ trợ tiếng Việt và định dạng JSON tuyệt vời
-    "gemini-3.5-flash",      // Mô hình thế hệ mới
-    "gemini-2.0-flash",      // Mô hình tốc độ cao và ổn định
+    "gemini-2.5-flash",      // Mô hình chuẩn thế hệ mới: cực kỳ ổn định, hỗ trợ tiếng Việt tuyệt vời
+    "gemini-2.0-flash",      // Mô hình thế hệ mới tốc độ siêu nhanh
+    "gemini-1.5-flash",      // Mô hình dòng 1.5 cực kì ổn định
+    "gemini-3.5-flash",      // Mô hình 3.5 mới
     "gemini-flash-latest",   // Phiên bản ổn định mới nhất của dòng Flash
-    "gemini-3.1-flash-lite", // Phiên bản siêu nhẹ
-    "gemini-3-flash-preview"
+    "gemini-3.1-flash-lite", // Phiên bản siêu nhẹ, độ trễ cực thấp
   ];
   let lastError: any = null;
 
@@ -54,7 +54,32 @@ async function generateContentWithRetryAndFallback(prompt: string): Promise<stri
           contents: [{ role: "user", parts: [{ text: prompt }] }],
           config: {
             temperature: 0.1,
-            responseMimeType: "application/json"
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  text: {
+                    type: Type.STRING,
+                    description: "Từ hoặc cụm từ bị lỗi gốc trong văn bản."
+                  },
+                  error: {
+                    type: Type.STRING,
+                    description: "Mô tả lý do hoặc lỗi sai quy chuẩn/chính tả."
+                  },
+                  suggestion: {
+                    type: Type.STRING,
+                    description: "Đề xuất sửa lại cho chính xác quy chuẩn."
+                  },
+                  type: {
+                    type: Type.STRING,
+                    description: "Loại lỗi (ví dụ: chính tả, viết hoa, văn phong, nghị định 30, hướng dẫn 36, quy chuẩn)."
+                  }
+                },
+                required: ["text", "error", "suggestion", "type"]
+              }
+            }
           }
         });
 
@@ -64,16 +89,25 @@ async function generateContentWithRetryAndFallback(prompt: string): Promise<stri
         throw new Error("Phản hồi từ mô hình AI bị trống");
       } catch (err: any) {
         lastError = err;
-        let statusCode = err.status || err.error?.code;
+        let statusCode = err.status || err.statusCode || err.error?.code;
         
-        // Kiểm tra mã lỗi từ thông điệp nếu không có thuộc tính code trực tiếp
+        // Thử trích xuất mã số lỗi từ chuỗi JSON hoặc thông điệp lỗi nếu không có trực tiếp
         if (!statusCode && err.message) {
-          if (err.message.includes("429") || err.message.includes("quota") || err.message.includes("RESOURCE_EXHAUSTED")) {
-            statusCode = 429;
-          } else if (err.message.includes("503") || err.message.includes("UNAVAILABLE")) {
-            statusCode = 503;
-          } else if (err.message.includes("500") || err.message.includes("INTERNAL")) {
-            statusCode = 500;
+          try {
+            const matches = err.message.match(/"code"\s*:\s*(\d+)/) || err.message.match(/status\s*code\s*(\d+)/i);
+            if (matches) {
+              statusCode = parseInt(matches[1], 10);
+            }
+          } catch (_) {}
+          
+          if (!statusCode) {
+            if (err.message.includes("429") || err.message.includes("quota") || err.message.includes("RESOURCE_EXHAUSTED") || err.message.includes("limit") || err.message.includes("exceeded")) {
+              statusCode = 429;
+            } else if (err.message.includes("503") || err.message.includes("UNAVAILABLE")) {
+              statusCode = 503;
+            } else if (err.message.includes("500") || err.message.includes("INTERNAL")) {
+              statusCode = 500;
+            }
           }
         }
         
@@ -90,6 +124,20 @@ async function generateContentWithRetryAndFallback(prompt: string): Promise<stri
 
         // Thử lại nếu gặp lỗi 429 (Quota)
         if (statusCode === 429) {
+          // Nếu thông điệp lỗi chứa dấu hiệu cạn kiệt hạn mức/Quota Exceeded, việc thử lại mô hình này là vô ích.
+          // Chúng ta lập tức chuyển đổi sang mô hình dự phòng tiếp theo để tối ưu hóa thời gian phản hồi.
+          const isModelQuotaExceeded = err.message && (
+            err.message.toLowerCase().includes("quota") || 
+            err.message.toLowerCase().includes("resource_exhausted") || 
+            err.message.toLowerCase().includes("limit") ||
+            err.message.toLowerCase().includes("exceeded")
+          );
+
+          if (isModelQuotaExceeded) {
+            console.warn(`Đã cạn kiệt Quota của mô hình ${modelName}. Chuyển hướng lập tức sang cấu hình dự phòng tiếp theo...`);
+            break; 
+          }
+
           retries--;
           if (retries > 0) {
             console.log(`Đang đợi ${delay}ms trước khi thử lại mô hình ${modelName}...`);
@@ -114,11 +162,128 @@ async function generateContentWithRetryAndFallback(prompt: string): Promise<stri
 app.post("/api/proofread", async (req, res) => {
   try {
     const { text, mode, learnedContext } = req.body;
-    if (!text) return res.json({ errors: [] });
+    if (!text) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.write(`data: ${JSON.stringify({ type: "chunk_result", errors: [] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+      return res.end();
+    }
 
     // Đọc kiến thức đã học
     const knowledgeData = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
     const knowledgeString = knowledgeData.learnedRules.join("\n");
+
+function cleanJsonNewlines(jsonStr: string): string {
+  let insideString = false;
+  let result = "";
+  for (let i = 0; i < jsonStr.length; i++) {
+    const char = jsonStr[i];
+    if (char === '"' && (i === 0 || jsonStr[i - 1] !== '\\')) {
+      insideString = !insideString;
+      result += char;
+    } else if (insideString && (char === '\n' || char === '\r')) {
+      result += " "; // Thay thế xuống dòng thực tế bằng khoảng trắng để tránh lỗi cú pháp JSON
+    } else {
+      result += char;
+    }
+  }
+  return result;
+}
+
+function parseRobustJsonArray(text: string): any[] {
+  let cleaned = text.trim();
+  
+  // Loại bỏ Markdown codeblock nếu có
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  }
+
+  // 1. Thử parse nguyên bản sau khi đã dọn dẹp ký tự xuống dòng thực tế
+  try {
+    const cleanStr = cleanJsonNewlines(cleaned);
+    const parsed = JSON.parse(cleanStr);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === "object") return [parsed];
+  } catch (err) {
+    console.warn("JSON.parse trực tiếp thất bại, đang chuyển sang các bộ lọc phục hồi...", err);
+  }
+
+  // 2. Trích xuất tất cả các khối {...} bằng Regex nhiều dòng
+  const objectRegex = /\{[\s\S]*?\}/g;
+  const matches = cleaned.match(objectRegex);
+  if (matches && matches.length > 0) {
+    const list: any[] = [];
+    for (const match of matches) {
+      try {
+        const cleanItemStr = cleanJsonNewlines(match);
+        const item = JSON.parse(cleanItemStr);
+        if (item && item.text) {
+          list.push(item);
+        }
+      } catch (e) {
+        // Thử dọn dẹp thêm các lỗi sai cấu trúc nhỏ khác nếu có thể
+        try {
+          let fixedMatch = match.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
+          fixedMatch = cleanJsonNewlines(fixedMatch);
+          const item = JSON.parse(fixedMatch);
+          if (item && item.text) {
+            list.push(item);
+          }
+        } catch (_) {}
+      }
+    }
+    if (list.length > 0) {
+      return list;
+    }
+  }
+
+  // 3. Thử sửa chữa ngoặc dở dang theo thuật toán đếm ngoặc
+  let repaired = cleaned;
+  try {
+    if (repaired.endsWith(",")) {
+      repaired = repaired.substring(0, repaired.length - 1);
+    }
+    let openBraces = (repaired.match(/\{/g) || []).length;
+    let closeBraces = (repaired.match(/\}/g) || []).length;
+    let openBrackets = (repaired.match(/\[/g) || []).length;
+    let closeBrackets = (repaired.match(/\]/g) || []).length;
+
+    while (openBraces > closeBraces) {
+      repaired += "}";
+      closeBraces++;
+    }
+    while (openBrackets > closeBrackets) {
+      repaired += "]";
+      closeBrackets++;
+    }
+    
+    const parsed = JSON.parse(cleanJsonNewlines(repaired));
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === "object") return [parsed];
+  } catch (e) {
+    // Thất bại
+  }
+
+  // 4. Giải pháp cuối cùng: Quét lấy tất cả các cặp thuộc tính bằng Regex
+  const errors: any[] = [];
+  try {
+    const itemPattern = /"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"error"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"suggestion"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"type"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
+    let match;
+    while ((match = itemPattern.exec(cleaned)) !== null) {
+      errors.push({
+        text: match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+        error: match[2].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+        suggestion: match[3].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+        type: match[4].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+      });
+    }
+  } catch (_) {}
+
+  return errors;
+}
 
     // Hàm xử lý từng đoạn văn bản
     const processChunk = async (chunkText: string) => {
@@ -145,12 +310,7 @@ app.post("/api/proofread", async (req, res) => {
 
       const responseText = await generateContentWithRetryAndFallback(prompt);
 
-      try {
-        return JSON.parse(responseText);
-      } catch (e) {
-        const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-        return jsonMatch ? JSON.parse(jsonMatch[0]) : [];
-      }
+      return parseRobustJsonArray(responseText);
     };
 
     // Chia nhỏ văn bản thành các đoạn lớn (khoảng 15000 ký tự) để giảm số lượng request
@@ -174,39 +334,57 @@ app.post("/api/proofread", async (req, res) => {
       currentPos = nextPos;
     }
 
+    // Thiết lập headers trả về dưới dạng sự kiện truyền phát thời gian thực (SSE)
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+
     // Xử lý tuần tự thay vì song song để tránh lỗi 429
-    const errors = [];
+    let totalErrorsCount = 0;
     let lastChunkError: any = null;
     for (const chunk of chunks) {
       try {
         const result = await processChunk(chunk);
         if (Array.isArray(result)) {
-          errors.push(...result);
+          totalErrorsCount += result.length;
+          res.write(`data: ${JSON.stringify({ type: "chunk_result", errors: result })}\n\n`);
         }
       } catch (chunkError: any) {
         console.error("Error processing chunk:", chunkError);
         lastChunkError = chunkError;
-        if (chunkError.status === 429) {
-          return res.status(429).json({ 
-            errors, 
-            warning: "Văn bản quá dài và đã chạm giới hạn API." 
-          });
+        
+        const statusCode = chunkError.status || chunkError.statusCode || chunkError.error?.code;
+        if (statusCode === 429) {
+          res.write(`data: ${JSON.stringify({ 
+            type: "warning", 
+            message: "Giới hạn yêu cầu đã hết (API Quota limit). Vui lòng đợi một lát rồi thử rà soát lại một lần nữa." 
+          })}\n\n`);
+          break; // Đổ bể do hết quota, không xử lý tiếp để tránh quá tải
         }
-        // Tiếp tục các đoạn khác nếu lỗi không phải do giới hạn
+        
+        res.write(`data: ${JSON.stringify({ 
+          type: "warning", 
+          message: `Lỗi khi xử lý một phần văn bản: ${chunkError.message || "Đã xảy ra lỗi không xác định"}` 
+        })}\n\n`);
       }
     }
 
-    if (errors.length === 0 && lastChunkError) {
+    if (totalErrorsCount === 0 && lastChunkError) {
       throw lastChunkError;
     }
     
-    return res.json({ errors });
+    res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+    res.end();
   } catch (error: any) {
     console.error("Error proofreading:", error);
-    if (error.status === 429) {
-       return res.status(429).json({ error: "Giới hạn yêu cầu đã hết. Vui lòng đợi một lát rồi thử lại." });
+    if (res.headersSent) {
+      res.write(`data: ${JSON.stringify({ type: "error", error: error.message || "Lỗi hệ thống khi rà soát văn bản" })}\n\n`);
+      return res.end();
     }
-    res.status(error.status || 500).json({ error: error.message || "Lỗi hệ thống khi rà soát văn bản" });
+    res.setHeader("Content-Type", "text/event-stream");
+    res.write(`data: ${JSON.stringify({ type: "error", error: error.message || "Lỗi hệ thống khi rà soát văn bản" })}\n\n`);
+    res.end();
   }
 });
 

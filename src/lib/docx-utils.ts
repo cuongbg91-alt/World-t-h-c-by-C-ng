@@ -1,9 +1,25 @@
-import { Document, Packer, Paragraph, TextRun, AlignmentType, Table, TableRow, TableCell, BorderStyle, WidthType } from "docx";
+import { Document, Packer, Paragraph, TextRun, AlignmentType, Table, TableRow, TableCell, BorderStyle, WidthType, PageOrientation } from "docx";
 import { saveAs } from "file-saver";
 import mammoth from "mammoth";
+import JSZip from "jszip";
 
-export async function parseDocx(file: File): Promise<{ text: string; html: string }> {
+export async function parseDocx(file: File): Promise<{ text: string; html: string; orientation: "portrait" | "landscape" }> {
   const arrayBuffer = await file.arrayBuffer();
+  
+  // Detect document page orientation using JSZip
+  let orientation: "portrait" | "landscape" = "portrait";
+  try {
+    const zip = await JSZip.loadAsync(file);
+    const docXmlFile = zip.file("word/document.xml");
+    if (docXmlFile) {
+      const docXmlText = await docXmlFile.async("text");
+      if (/w:orient\s*=\s*"landscape"/i.test(docXmlText)) {
+        orientation = "landscape";
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to detect page orientation from Docx ZIP metadata, defaulting to portrait:", err);
+  }
   
   // Heuristic checking to distinguish layout tables (headers/footers with metadata side-by-side)
   // from standard grid-tables containing structured data
@@ -71,11 +87,12 @@ export async function parseDocx(file: File): Promise<{ text: string; html: strin
   
   return {
     text: textResult.value,
-    html: result.value
+    html: result.value,
+    orientation
   };
 }
 
-export async function generateDocx(html: string, fileName: string) {
+export async function generateDocx(html: string, fileName: string, orientation: "portrait" | "landscape" = "portrait") {
   if (typeof window === "undefined" || !html) return;
 
   const parser = new DOMParser();
@@ -412,7 +429,21 @@ export async function generateDocx(html: string, fileName: string) {
   const doc = new Document({
     sections: [
       {
-        properties: {},
+        properties: {
+          page: {
+            size: {
+              orientation: orientation === "landscape" ? PageOrientation.LANDSCAPE : PageOrientation.PORTRAIT,
+              width: orientation === "landscape" ? 16838 : 11906, // A4 dimensions in twentieths of a point (dxa)
+              height: orientation === "landscape" ? 11906 : 16838,
+            },
+            margin: {
+              top: 1134,    // 2cm = 1134 dxa
+              bottom: 1134, // 2cm = 1134 dxa
+              left: 1701,   // 3cm = 1701 dxa
+              right: 1134,  // 2cm = 1134 dxa
+            },
+          },
+        },
         children: docxChildren,
       },
     ],
