@@ -11,6 +11,69 @@ interface ErrorItem {
   type: string;
 }
 
+function replaceTextInHtml(html: string, searchText: string, replacementHtml: string): string {
+  if (typeof window === "undefined" || !html || !searchText) return html;
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(`<div>${html}</div>`, "text/html");
+    const container = doc.body.firstChild as HTMLElement;
+    if (!container) return html;
+
+    const textNodes: Text[] = [];
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+    let node;
+    while ((node = walker.nextNode())) {
+      textNodes.push(node as Text);
+    }
+
+    const escapedSearch = searchText.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&').replace(/\s+/g, '\\s+');
+    const regex = new RegExp(escapedSearch, 'g');
+
+    // Quét ngược lại để việc thay đổi cấu trúc không ảnh hưởng tới indices của các node phía trước
+    for (let i = textNodes.length - 1; i >= 0; i--) {
+      const node = textNodes[i];
+      const text = node.textContent || "";
+      if (regex.test(text)) {
+        const parent = node.parentNode;
+        if (!parent) continue;
+
+        const fragment = document.createDocumentFragment();
+        let lastIndex = 0;
+        regex.lastIndex = 0;
+        let match;
+        while ((match = regex.exec(text)) !== null) {
+          // Thêm phần chữ trước khớp
+          const before = text.substring(lastIndex, match.index);
+          if (before) {
+            fragment.appendChild(document.createTextNode(before));
+          }
+          // Thêm phần thay thế cho đoạn chữ khớp
+          const temp = document.createElement("div");
+          temp.innerHTML = replacementHtml;
+          while (temp.firstChild) {
+            fragment.appendChild(temp.firstChild);
+          }
+          lastIndex = regex.lastIndex;
+        }
+        // Thêm phần chữ còn lại sau khớp cuối cùng
+        const after = text.substring(lastIndex);
+        if (after) {
+          fragment.appendChild(document.createTextNode(after));
+        }
+        parent.replaceChild(fragment, node);
+      }
+    }
+
+    return container.innerHTML;
+  } catch (err) {
+    console.error("Lỗi khi thay thế text trong HTML:", err);
+    // Fallback bảo vệ bằng Regex an toàn không can thiệp bên trong thẻ HTML <>
+    const escapedSearch = searchText.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    const regex = new RegExp(`(?![^<]*>)(${escapedSearch})`, 'g');
+    return html.replace(regex, replacementHtml);
+  }
+}
+
 export default function App() {
   const [originalText, setOriginalText] = useState("");
   const [htmlContent, setHtmlContent] = useState("");
@@ -84,7 +147,10 @@ export default function App() {
 
   const proofread = async (targetText?: string) => {
     const textToProcess = targetText || originalText;
-    if (!textToProcess) return;
+    if (!textToProcess) {
+      alert("Vui lòng tải tệp docx hoặc dán văn bản hành chính cần rà soát.");
+      return;
+    }
 
     setIsChecking(true);
     if (!targetText) setErrors([]);
@@ -178,13 +244,13 @@ export default function App() {
 
   const fixItem = (index: number) => {
     const error = errors[index];
-    // Sử dụng Regex để thay thế chính xác cụm từ lỗi
+    // Sử dụng Regex để thay thế cụm từ lỗi trong chuỗi văn bản gốc
     const escapedText = error.text.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
     const regex = new RegExp(escapedText, 'g');
     
     const correctedHtml = `<span class="corrected-term bg-green-50 text-emerald-600 font-bold border-b border-solid border-emerald-600" title="Đã sửa từ lỗi '${error.text}': ${error.error}">${error.suggestion}</span>`;
     
-    setHtmlContent(prev => prev.replace(regex, correctedHtml));
+    setHtmlContent(prev => replaceTextInHtml(prev, error.text, correctedHtml));
     setOriginalText(prev => prev.replace(regex, error.suggestion));
     setErrors(prev => prev.filter((_, i) => i !== index));
   };
@@ -201,7 +267,7 @@ export default function App() {
       const regex = new RegExp(escapedText, 'g');
       const correctedHtml = `<span class="corrected-term bg-green-50 text-emerald-600 font-bold border-b border-solid border-emerald-600" title="Đã sửa từ lỗi '${error.text}': ${error.error}">${error.suggestion}</span>`;
       
-      newHtml = newHtml.replace(regex, correctedHtml);
+      newHtml = replaceTextInHtml(newHtml, error.text, correctedHtml);
       newText = newText.replace(regex, error.suggestion);
     });
 
@@ -245,7 +311,7 @@ export default function App() {
           onProofreadSelection={proofreadSelection}
           onFixAll={fixAll} 
           onFixItem={fixItem}
-          onLinkToItem={setHighlightedError}
+          onLinkToItem={(item) => setHighlightedError({ ...item, id: Math.random() })}
           onLearn={handleLearn}
           isChecking={isChecking}
         />

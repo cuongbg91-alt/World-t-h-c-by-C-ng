@@ -34,18 +34,15 @@ const ai = new GoogleGenAI({
 // Hàm hỗ trợ gọi Gemini với cơ chế thử lại và chuyển đổi mô hình dự phòng khi gặp lỗi
 async function generateContentWithRetryAndFallback(prompt: string): Promise<string> {
   const modelsToTry = [
-    "gemini-2.5-flash",      // Mô hình chuẩn thế hệ mới: cực kỳ ổn định, hỗ trợ tiếng Việt tuyệt vời
-    "gemini-2.0-flash",      // Mô hình thế hệ mới tốc độ siêu nhanh
-    "gemini-1.5-flash",      // Mô hình dòng 1.5 cực kì ổn định
-    "gemini-3.5-flash",      // Mô hình 3.5 mới
-    "gemini-flash-latest",   // Phiên bản ổn định mới nhất của dòng Flash
-    "gemini-3.1-flash-lite", // Phiên bản siêu nhẹ, độ trễ cực thấp
+    "gemini-3.1-flash-lite", // Phiên bản siêu nhẹ, độ trễ cực thấp, hạn mức (quota) rất cao
+    "gemini-flash-latest",   // Phiên bản ổn định mạnh mẽ của dòng Flash
+    "gemini-3.5-flash",      // Mô hình 3.5 mới (hạn mức dùng thử 20 lượt/ngày khá thấp, nên làm phương án dự phòng)
   ];
   let lastError: any = null;
 
   for (const modelName of modelsToTry) {
-    let retries = 3;
-    let delay = 1500; // Khởi đầu 1.5 giây
+    let retries = 2; // Giảm xuống 2 để chuyển đổi mô hình nhanh hơn nếu gặp lỗi
+    let delay = 1000;
 
     while (retries > 0) {
       try {
@@ -111,21 +108,16 @@ async function generateContentWithRetryAndFallback(prompt: string): Promise<stri
           }
         }
         
-        // Ghi nhận cảnh báo lỗi
-        console.warn(`Lỗi khi gọi mô hình ${modelName} (Số lượt thử lại còn lại: ${retries - 1}, Mã lỗi: ${statusCode}):`, err.message || err);
+        // Ghi nhận cảnh báo lỗi nhẹ nhàng, không in toàn bộ stack trace JSON cồng kềnh
+        const shortMsg = err.message ? (err.message.substring(0, 150) + "...") : err;
+        console.warn(`[Gemini Fallback Window] Gọi mô hình ${modelName} gặp sự cố (Mã lỗi: ${statusCode || "unknown"}). Chi tiết: ${shortMsg}`);
 
-        // Đối với lỗi 500 (INTERNAL) hoặc 503 (UNAVAILABLE/High Demand): Thường là sự cố hạ tầng cố định 
-        // hoặc quá tải cục bộ của từng dòng mô hình, việc cố thử lại liên tiếp chỉ làm chậm hệ thống.
-        // Lập tức break để chuyển sang mô hình dự phòng tiếp theo nhằm bảo đảm trải nghiệm mượt mà.
+        // Đối với lỗi 500 hoặc 503 hoặc 429 quá tải: chuyển ngay sang mô hình dự phòng tiếp theo
         if (statusCode === 500 || statusCode === 503) {
-          console.warn(`Gặp lỗi ${statusCode} (quá tải hoặc lỗi hệ thống) tại mô hình ${modelName}. Chuyển hướng lập tức sang mô hình dự phòng kế tiếp...`);
           break;
         }
 
-        // Thử lại nếu gặp lỗi 429 (Quota)
         if (statusCode === 429) {
-          // Nếu thông điệp lỗi chứa dấu hiệu cạn kiệt hạn mức/Quota Exceeded, việc thử lại mô hình này là vô ích.
-          // Chúng ta lập tức chuyển đổi sang mô hình dự phòng tiếp theo để tối ưu hóa thời gian phản hồi.
           const isModelQuotaExceeded = err.message && (
             err.message.toLowerCase().includes("quota") || 
             err.message.toLowerCase().includes("resource_exhausted") || 
@@ -134,28 +126,28 @@ async function generateContentWithRetryAndFallback(prompt: string): Promise<stri
           );
 
           if (isModelQuotaExceeded) {
-            console.warn(`Đã cạn kiệt Quota của mô hình ${modelName}. Chuyển hướng lập tức sang cấu hình dự phòng tiếp theo...`);
+            console.warn(`Mô hình ${modelName} hết hạn mức (Quota). Chuyển sang mô hình tiếp theo ngay lập tức...`);
             break; 
           }
 
           retries--;
           if (retries > 0) {
-            console.log(`Đang đợi ${delay}ms trước khi thử lại mô hình ${modelName}...`);
             await new Promise((resolve) => setTimeout(resolve, delay));
-            delay *= 2; // Tăng dần thời gian chờ luỹ tiến
+            delay *= 1.5;
             continue;
           }
         }
         
-        // Với các lỗi định cấu hình khác hoặc khi đã hết lượt thử của mô hình hiện tại, chuyển sang model kế tiếp
         break;
       }
     }
   }
 
-  // Giữ nguyên lỗi cuối cùng nếu có để ném ra ngoài
-  const finalError = new Error(lastError?.message || "Tất cả các mô hình AI đều không phản hồi") as any;
-  if (lastError?.status) finalError.status = lastError.status;
+  // Thay vì trả về lỗi JSON thô kệch, trả về thông báo tiếng Việt lịch sự và dễ hiểu cho người dùng
+  const finalError = new Error(
+    "Hệ thống rà soát hiện đang bận hoặc đạt giới hạn lưu lượng dùng thử (API Quota Limit). Vui lòng đợi khoảng 1 phút rồi nhấn rà soát lại văn bản."
+  ) as any;
+  finalError.status = 429;
   throw finalError;
 }
 
@@ -419,7 +411,7 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false },
       appType: "spa",
     });
     app.use(vite.middlewares);

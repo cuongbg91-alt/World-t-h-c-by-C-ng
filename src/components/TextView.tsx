@@ -1,16 +1,10 @@
-import React, { useRef, useEffect, useMemo } from "react";
+import React, { useRef, useEffect, useMemo, useState } from "react";
 
 interface ErrorItem {
   text: string;
   error: string;
   suggestion: string;
   type: string;
-}
-
-interface TextViewProps {
-  htmlContent: string;
-  errors: ErrorItem[];
-  highlightedError: ErrorItem | null;
 }
 
 // Hàm hỗ trợ loại bỏ hoàn toàn khoảng trắng, tab và dấu xuống dòng dư thừa ở phía cuối của các thẻ phần tử
@@ -75,26 +69,7 @@ interface TextViewProps {
 
 export default function TextView({ htmlContent, errors, highlightedError, orientation, onOrientationChange }: TextViewProps) {
   const contentRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (highlightedError && contentRef.current) {
-      const walker = document.createTreeWalker(contentRef.current, NodeFilter.SHOW_TEXT, null);
-      let node;
-      while ((node = walker.nextNode())) {
-        if (node.textContent?.includes(highlightedError.text)) {
-          const parent = node.parentElement as HTMLElement;
-          if (parent) {
-            parent.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            parent.classList.add('bg-yellow-100');
-            setTimeout(() => {
-               parent.classList.remove('bg-yellow-100');
-            }, 2000);
-          }
-          break;
-        }
-      }
-    }
-  }, [highlightedError]);
+  const [pages, setPages] = useState<string[]>([]);
 
   const processedHtml = useMemo(() => {
     if (!htmlContent) return "";
@@ -121,30 +96,153 @@ export default function TextView({ htmlContent, errors, highlightedError, orient
     return processed;
   }, [htmlContent, errors]);
 
+  // Thuật toán tự động phân trang A4 đứng/ngang dựa trên môi trường đo lường thực tế
+  useEffect(() => {
+    if (!processedHtml) {
+      setPages([]);
+      return;
+    }
+
+    try {
+      // Tạo một container ảo nằm ẩn để tính toán chiều cao pixel thực của các thẻ con dưới zoom màn hình hiện hành
+      const measureContainer = document.createElement("div");
+      measureContainer.setAttribute("id", "pagination-measure-container");
+      measureContainer.style.position = "absolute";
+      measureContainer.style.left = "-9999px";
+      measureContainer.style.top = "-9999px";
+      measureContainer.style.width = "0";
+      measureContainer.style.height = "0";
+      measureContainer.style.overflow = "hidden";
+      measureContainer.style.visibility = "hidden";
+      
+      // Áp dụng đúng bề rộng cùng font chữ tương đồng trang Word chuẩn
+      const widthClass = orientation === "landscape" ? "w-[297mm]" : "w-[210mm]"; 
+      const paddingLeft = "30mm";
+      const paddingRight = "20mm";
+      
+      // Tạo một mốc đo lường chiều cao chuẩn
+      const targetHeightMeasure = document.createElement("div");
+      targetHeightMeasure.style.height = orientation === "landscape" ? "170mm" : "257mm"; 
+      measureContainer.appendChild(targetHeightMeasure);
+      document.body.appendChild(measureContainer);
+      
+      // Chuyển đổi mm sang pixel thực tế của trình duyệt tại Zoom hiện tại
+      const maxPageHeightPx = targetHeightMeasure.clientHeight || (orientation === "landscape" ? 642 : 971); 
+      measureContainer.removeChild(targetHeightMeasure);
+      
+      const pageClone = document.createElement("div");
+      pageClone.className = `${widthClass} font-['Times_New_Roman',serif] text-[#111111] leading-[1.6] word-render`;
+      pageClone.style.paddingLeft = paddingLeft;
+      pageClone.style.paddingRight = paddingRight;
+      pageClone.style.boxSizing = "border-box";
+      measureContainer.appendChild(pageClone);
+
+      // Parse cấu trúc HTML đã highlight lỗi
+      const tempDiv = document.createElement("div");
+      tempDiv.innerHTML = processedHtml;
+      const elements = Array.from(tempDiv.children);
+
+      const paginatedPages: string[] = [];
+      let currentPageDiv = document.createElement("div");
+      pageClone.appendChild(currentPageDiv);
+
+      elements.forEach((el) => {
+        const cloneEl = el.cloneNode(true) as HTMLElement;
+        currentPageDiv.appendChild(cloneEl);
+
+        // Đẩy sang trang mới khi nội dung vách trang vượt chiều cao in khả dụng
+        if (currentPageDiv.clientHeight > maxPageHeightPx) {
+          if (currentPageDiv.children.length > 1) {
+            currentPageDiv.removeChild(cloneEl);
+            paginatedPages.push(currentPageDiv.innerHTML);
+            
+            currentPageDiv = document.createElement("div");
+            pageClone.innerHTML = ""; 
+            pageClone.appendChild(currentPageDiv);
+            currentPageDiv.appendChild(cloneEl);
+          } else {
+            // Phần tử đầu tiên của trang nhưng vượt quá chiều cao lớn nhất (bảng biểu dài chẳng hạn), chấp nhận giữ lại
+            paginatedPages.push(currentPageDiv.innerHTML);
+            
+            currentPageDiv = document.createElement("div");
+            pageClone.innerHTML = "";
+            pageClone.appendChild(currentPageDiv);
+          }
+        }
+      });
+
+      if (currentPageDiv.children.length > 0) {
+        paginatedPages.push(currentPageDiv.innerHTML);
+      }
+
+      document.body.removeChild(measureContainer);
+      setPages(paginatedPages.length > 0 ? paginatedPages : [processedHtml]);
+    } catch (err) {
+      console.error("Lỗi khi tính toán phân trang tự động:", err);
+      setPages([processedHtml]);
+    }
+  }, [processedHtml, orientation]);
+
+  // Cuộn mượt mà đưa lỗi tới tầm nhìn người dùng
+  useEffect(() => {
+    if (highlightedError && contentRef.current) {
+      const walker = document.createTreeWalker(contentRef.current, NodeFilter.SHOW_TEXT, null);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (node.textContent?.includes(highlightedError.text)) {
+          const parent = node.parentElement as HTMLElement;
+          if (parent) {
+            parent.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            parent.classList.add('bg-yellow-100', 'ring-4', 'ring-yellow-400/30', 'transition-all');
+            setTimeout(() => {
+               parent.classList.remove('bg-yellow-105', 'ring-4', 'ring-yellow-400/30');
+            }, 2000);
+          }
+          break;
+        }
+      }
+    }
+  }, [highlightedError]);
+
   return (
     <div className="flex-1 flex flex-col bg-[#cbd5e1] overflow-hidden">
       <div className="flex-1 overflow-auto p-12 flex justify-center shadow-inner animate-fade-in">
-        <div 
-          className={`${
-            orientation === "landscape" ? "w-[297mm] min-h-[210mm]" : "w-[210mm] min-h-[297mm]"
-          } bg-white shadow-2xl pt-[20mm] pb-[20mm] pl-[30mm] pr-[20mm] font-['Times_New_Roman',serif] text-[#111111] leading-[1.6] relative transition-all`} 
-          id="word-content"
-        >
-          {!htmlContent ? (
-            <div className="h-full flex flex-col items-center justify-center text-slate-400 mt-40">
+        {!htmlContent ? (
+          <div 
+            className={`${
+              orientation === "landscape" ? "w-[297mm] min-h-[210mm]" : "w-[210mm] min-h-[297mm]"
+            } bg-white shadow-2xl pt-[20mm] pb-[20mm] pl-[30mm] pr-[20mm] font-['Times_New_Roman',serif] text-[#111111] leading-[1.6] relative transition-all flex flex-col items-center justify-center`} 
+            id="word-content"
+          >
+            <div className="flex flex-col items-center justify-center text-slate-400">
               <div className="w-24 h-24 border-2 border-dashed border-slate-300 rounded-2xl flex items-center justify-center mb-6 bg-slate-50">
                 <span className="text-5xl opacity-40">📄</span>
               </div>
-              <p className="text-sm font-medium">Tải tệp tin DOCX để rà soát</p>
+              <p className="text-sm font-medium">Tải tệp tin DOCX hoặc dán văn bản để rà soát</p>
             </div>
-          ) : (
-            <div 
-              ref={contentRef}
-              dangerouslySetInnerHTML={{ __html: processedHtml }} 
-              className="word-render"
-            />
-          )}
-        </div>
+          </div>
+        ) : (
+          <div ref={contentRef} id="word-content" className="flex flex-col gap-8 w-full items-center select-text pb-12">
+            {pages.map((pageHtml, index) => (
+              <div
+                key={index}
+                className={`${
+                  orientation === "landscape" ? "w-[297mm] h-[210mm]" : "w-[210mm] h-[297mm]"
+                } bg-white shadow-2xl pt-[20mm] pb-[15mm] pl-[30mm] pr-[20mm] font-['Times_New_Roman',serif] text-[#111111] leading-[1.6] relative transition-all duration-300 border border-slate-200/50 hover:shadow-emerald-100 hover:shadow-3xl flex flex-col justify-between`}
+              >
+                <div 
+                  dangerouslySetInnerHTML={{ __html: pageHtml }} 
+                  className="word-render w-full flex-1 overflow-hidden"
+                />
+                
+                {/* Phần số trang biểu diễn tinh tế chìm ở cuối trang in */}
+                <div className="text-center text-xs text-slate-400 font-mono select-none pt-2 border-t border-slate-100/60 mt-4">
+                  Trang {index + 1} / {pages.length}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
       
       <style>{`

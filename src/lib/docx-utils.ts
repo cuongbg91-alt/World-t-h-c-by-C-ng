@@ -97,8 +97,19 @@ export async function generateDocx(html: string, fileName: string, orientation: 
 
   const parser = new DOMParser();
   const docElement = parser.parseFromString(html, "text/html");
-  // The .word-render div contains the processed document HTML
-  const contentNode = docElement.querySelector(".word-render") || docElement.querySelector("#word-content") || docElement.body;
+  
+  // Tổng hợp toàn bộ các node con nằm trong tất cả các trang văn bản (đối tượng có class là .word-render)
+  const wordRenders = docElement.querySelectorAll(".word-render");
+  let rootChildren: Node[] = [];
+  
+  if (wordRenders.length > 0) {
+    wordRenders.forEach(renderNode => {
+      rootChildren.push(...Array.from(renderNode.childNodes));
+    });
+  } else {
+    const contentNode = docElement.querySelector("#word-content") || docElement.body;
+    rootChildren = Array.from(contentNode.childNodes);
+  }
   
   const docxChildren: any[] = [];
   
@@ -393,7 +404,6 @@ export async function generateDocx(html: string, fileName: string, orientation: 
   }
 
   // Parse direct structural nodes
-  const rootChildren = Array.from(contentNode.childNodes);
   for (const node of rootChildren) {
     if (node.nodeType === Node.TEXT_NODE) {
       const text = node.textContent || "";
