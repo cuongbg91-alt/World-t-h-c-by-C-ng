@@ -65,9 +65,68 @@ interface TextViewProps {
   highlightedError: ErrorItem | null;
   orientation: "portrait" | "landscape";
   onOrientationChange: (orientation: "portrait" | "landscape") => void;
+  mode: string;
 }
 
-export default function TextView({ htmlContent, errors, highlightedError, orientation, onOrientationChange }: TextViewProps) {
+function removeVietnameseTones(str: string): string {
+  return str
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "D");
+}
+
+function formatSpecialHeadersHTML(html: string, mode: string): string {
+  if (typeof window === "undefined" || !html) return html;
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    
+    const elements = doc.querySelectorAll("p, span, td, th, h1, h2, h3, div, b, strong");
+    
+    elements.forEach(el => {
+      const text = el.textContent || "";
+      if (!text.trim()) return;
+      
+      const norm = text.toLowerCase().trim().replace(/\s+/g, " ");
+      const noTone = removeVietnameseTones(norm);
+      
+      let shouldKeepOnSingleLine = false;
+      
+      if (mode === "nd30-report" || mode === "nd30-decision") {
+        const matchQuocHieu = noTone.includes("cong hoa xa hoi chu nghia viet nam");
+        const matchTieuNgu = noTone.includes("doc lap") && noTone.includes("tu do") && noTone.includes("hanh phuc");
+        if (matchQuocHieu || matchTieuNgu) {
+          shouldKeepOnSingleLine = true;
+        }
+      } else if (mode === "hd36") {
+        const matchDangCS = noTone.includes("dang cong san viet nam");
+        const matchCoQuanDang = noTone.startsWith("dang bo") || 
+                                noTone.startsWith("chi bo") || 
+                                noTone.startsWith("tinh uy") || 
+                                noTone.startsWith("thanh uy") || 
+                                noTone.startsWith("huyen uy") || 
+                                noTone.startsWith("trung uong dang") || 
+                                noTone.startsWith("ban chap hanh") || 
+                                noTone.startsWith("ban thuong vu");
+        if (matchDangCS || matchCoQuanDang) {
+          shouldKeepOnSingleLine = true;
+        }
+      }
+      
+      if (shouldKeepOnSingleLine) {
+        (el as HTMLElement).style.setProperty("white-space", "nowrap", "important");
+      }
+    });
+    
+    return doc.body.innerHTML;
+  } catch (err) {
+    console.error("Lỗi khi định dạng dòng tiêu đề đặc biệt:", err);
+    return html;
+  }
+}
+
+export default function TextView({ htmlContent, errors, highlightedError, orientation, onOrientationChange, mode }: TextViewProps) {
   const contentRef = useRef<HTMLDivElement>(null);
   const [pages, setPages] = useState<string[]>([]);
 
@@ -93,8 +152,9 @@ export default function TextView({ htmlContent, errors, highlightedError, orient
         console.error("Highlight error:", err.text, e);
       }
     });
-    return processed;
-  }, [htmlContent, errors]);
+
+    return formatSpecialHeadersHTML(processed, mode);
+  }, [htmlContent, errors, mode]);
 
   // Thuật toán tự động phân trang A4 đứng/ngang dựa trên môi trường đo lường thực tế
   useEffect(() => {
@@ -195,7 +255,7 @@ export default function TextView({ htmlContent, errors, highlightedError, orient
             parent.scrollIntoView({ behavior: 'smooth', block: 'center' });
             parent.classList.add('bg-yellow-100', 'ring-4', 'ring-yellow-400/30', 'transition-all');
             setTimeout(() => {
-               parent.classList.remove('bg-yellow-105', 'ring-4', 'ring-yellow-400/30');
+               parent.classList.remove('bg-yellow-100', 'ring-4', 'ring-yellow-400/30', 'transition-all');
             }, 2000);
           }
           break;

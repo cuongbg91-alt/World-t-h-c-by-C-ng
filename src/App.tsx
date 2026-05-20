@@ -5,10 +5,12 @@ import ErrorView from "./components/ErrorView";
 import { parseDocx, generateDocx } from "./lib/docx-utils";
 
 interface ErrorItem {
+  id?: string;
   text: string;
   error: string;
   suggestion: string;
   type: string;
+  timestamp?: number;
 }
 
 
@@ -235,7 +237,12 @@ export default function App() {
                   setErrors(prev => {
                     const existingKeys = new Set(prev.map(e => `${e.text}-${e.error}-${e.suggestion}`));
                     const uniqueNew = data.errors.filter((e: any) => !existingKeys.has(`${e.text}-${e.error}-${e.suggestion}`));
-                    return [...prev, ...uniqueNew];
+                    const uniqueNewWithMeta = uniqueNew.map((e: any, index: number) => ({
+                      ...e,
+                      id: e.id || `${Math.random().toString(36).substring(2, 9)}-${Date.now()}-${index}`,
+                      timestamp: e.timestamp || Date.now()
+                    }));
+                    return [...prev, ...uniqueNewWithMeta];
                   });
                 }
               } else if (data.type === "warning") {
@@ -259,7 +266,12 @@ export default function App() {
             setErrors(prev => {
               const existingKeys = new Set(prev.map(e => `${e.text}-${e.error}-${e.suggestion}`));
               const uniqueNew = data.errors.filter((e: any) => !existingKeys.has(`${e.text}-${e.error}-${e.suggestion}`));
-              return [...prev, ...uniqueNew];
+              const uniqueNewWithMeta = uniqueNew.map((e: any, index: number) => ({
+                ...e,
+                id: e.id || `${Math.random().toString(36).substring(2, 9)}-${Date.now()}-${index}`,
+                timestamp: e.timestamp || Date.now()
+              }));
+              return [...prev, ...uniqueNewWithMeta];
             });
           } else if (data.type === "error") {
             showToast("error", `Lỗi từ AI: ${data.error}`);
@@ -286,7 +298,9 @@ export default function App() {
     }
   };
 
-  const fixItem = (index: number) => {
+  const fixItem = (errorItem: ErrorItem) => {
+    const index = errors.findIndex(e => e.id === errorItem.id || (e.text === errorItem.text && e.error === errorItem.error));
+    if (index === -1) return;
     const error = errors[index];
     const escapedText = error.text.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
     const regex = new RegExp(escapedText, 'g');
@@ -349,6 +363,7 @@ export default function App() {
           highlightedError={highlightedError}
           orientation={orientation}
           onOrientationChange={handleOrientationChange}
+          mode={mode}
         />
         <ErrorView 
           errors={errors} 

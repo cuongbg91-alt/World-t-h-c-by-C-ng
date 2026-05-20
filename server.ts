@@ -33,10 +33,19 @@ const ai = new GoogleGenAI({
 
 // Hàm hỗ trợ gọi Gemini với cơ chế thử lại và chuyển đổi mô hình dự phòng khi gặp lỗi
 async function generateContentWithRetryAndFallback(prompt: string): Promise<string> {
+  if (!process.env.GEMINI_API_KEY) {
+    const keyError = new Error(
+      "Cơ sở dữ liệu đang thiếu cấu hình khoá bảo mật (GEMINI_API_KEY). Quý khách hãy thiết lập API Key trong phần Settings (góc trên cùng bên phải giao diện ứng dụng) để tiếp tục."
+    ) as any;
+    keyError.status = 401;
+    throw keyError;
+  }
+
   const modelsToTry = [
-    "gemini-3.1-flash-lite", // Phiên bản siêu nhẹ, độ trễ cực thấp, hạn mức (quota) rất cao
-    "gemini-flash-latest",   // Phiên bản ổn định mạnh mẽ của dòng Flash
-    "gemini-3.5-flash",      // Mô hình 3.5 mới (hạn mức dùng thử 20 lượt/ngày khá thấp, nên làm phương án dự phòng)
+    "gemini-3.5-flash",      // Mô hình thế hệ mới nhất, thông minh vượt trội, cực kỳ ổn định và ưu việt cho rà soát JSON
+    "gemini-3.1-flash-lite", // Bản siêu nhẹ, độ trễ cực thấp, hạn mức (Quota) rất lớn, dự phòng chống nghẽn lý tưởng
+    "gemini-2.5-flash",      // Mô hình thế hệ mới, bổ sung phương án dự phòng hiệu năng cao
+    "gemini-flash-latest",   // Phiên bản Flash ổn định kinh điển, dự phòng an toàn cuối cùng
   ];
   let lastError: any = null;
 
@@ -143,6 +152,17 @@ async function generateContentWithRetryAndFallback(prompt: string): Promise<stri
     }
   }
 
+  if (lastError) {
+    const errorMsg = (lastError.message || String(lastError)).toLowerCase();
+    if (errorMsg.includes("api_key_invalid") || errorMsg.includes("invalid api key") || errorMsg.includes("key is invalid") || errorMsg.includes("key_invalid")) {
+      const authError = new Error(
+        "Khóa bảo mật GEMINI_API_KEY không chính xác hoặc đã hết hiệu lực. Quý khách vui lòng kiểm tra lại cấu hình API Key trong mục Settings."
+      ) as any;
+      authError.status = 401;
+      throw authError;
+    }
+  }
+
   // Thay vì trả về lỗi JSON thô kệch, trả về thông báo tiếng Việt lịch sự và dễ hiểu cho người dùng
   const finalError = new Error(
     "Hệ thống rà soát hiện đang bận hoặc đạt giới hạn lưu lượng dùng thử (API Quota Limit). Vui lòng đợi khoảng 1 phút rồi nhấn rà soát lại văn bản."
@@ -178,6 +198,8 @@ function cleanJsonNewlines(jsonStr: string): string {
       result += char;
     } else if (insideString && (char === '\n' || char === '\r')) {
       result += " "; // Thay thế xuống dòng thực tế bằng khoảng trắng để tránh lỗi cú pháp JSON
+    } else if (insideString && char === '\t') {
+      result += " "; // Thay thế tab thực tế bằng khoảng trắng để tránh lỗi cú pháp JSON
     } else {
       result += char;
     }

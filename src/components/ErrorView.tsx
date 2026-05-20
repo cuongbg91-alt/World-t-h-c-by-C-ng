@@ -2,10 +2,12 @@ import React, { useState } from "react";
 import { Search, Scissors, CheckCheck, Lightbulb, Link as LinkIcon, Send } from "lucide-react";
 
 interface ErrorItem {
+  id?: string;
   text: string;
   error: string;
   suggestion: string;
   type: string;
+  timestamp?: number;
 }
 
 interface ErrorViewProps {
@@ -13,7 +15,7 @@ interface ErrorViewProps {
   onProofread: () => void;
   onProofreadSelection: () => void;
   onFixAll: () => void;
-  onFixItem: (index: number) => void;
+  onFixItem: (item: ErrorItem) => void;
   onLinkToItem: (item: ErrorItem) => void;
   onLearn: (content: string) => void;
   isChecking: boolean;
@@ -77,40 +79,42 @@ export default function ErrorView({
             <p className="text-[13px] px-8 leading-relaxed italic">Chưa phát hiện lỗi. Nhấn "Soát toàn bộ" để bắt đầu rà soát theo quy chuẩn.</p>
           </div>
         ) : (
-          errors.map((item, index) => (
-            <div key={index} className="bg-white border border-brand-border rounded-lg p-3.5 shadow-sm border-l-4 border-l-brand-accent hover:shadow-md transition-shadow relative group">
-              <div className="flex justify-between items-start mb-2">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-brand-accent">
-                  {item.type}
-                </span>
-                <button 
-                  onClick={() => onLinkToItem(item)}
-                  className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-brand-muted hover:text-brand-primary"
-                  title="Tìm vị trí lỗi"
-                >
-                  <LinkIcon className="w-3 h-3" />
-                </button>
-              </div>
-              
-              <div className="mb-2.5">
-                <div className="text-[13px] font-medium text-brand-text mb-1 leading-snug">{item.error}</div>
-                <div className="text-[12px] text-brand-muted line-through decoration-brand-accent/30">{item.text}</div>
-              </div>
-              
-              <div className="flex items-center gap-2">
-                <div className="flex-1 text-[12px] bg-blue-50 text-brand-primary font-medium p-2 rounded border border-blue-100 italic">
-                  Gợi ý: {item.suggestion}
+          [...errors]
+            .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+            .map((item) => (
+              <div key={item.id || `${item.text}-${item.error}`} className="bg-white border border-brand-border rounded-lg p-3.5 shadow-sm border-l-4 border-l-brand-accent hover:shadow-md transition-shadow relative group">
+                <div className="flex justify-between items-start mb-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-brand-accent">
+                    {item.type}
+                  </span>
+                  <button 
+                    onClick={() => onLinkToItem(item)}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-brand-muted hover:text-brand-primary"
+                    title="Tìm vị trí lỗi"
+                  >
+                    <LinkIcon className="w-3 h-3" />
+                  </button>
                 </div>
-                <button 
-                  onClick={() => onFixItem(index)}
-                  className="p-2 bg-brand-primary text-white rounded hover:bg-blue-700 transition-colors shadow-sm"
-                  title="Áp dụng sửa lỗi"
-                >
-                  <CheckCheck className="w-3.5 h-3.5" />
-                </button>
+                
+                <div className="mb-2.5">
+                  <div className="text-[13px] font-medium text-brand-text mb-1 leading-snug">{item.error}</div>
+                  <div className="text-[12px] text-brand-muted line-through decoration-brand-accent/30">{item.text}</div>
+                </div>
+                
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 text-[12px] bg-blue-50 text-brand-primary font-medium p-2 rounded border border-blue-100 italic">
+                    Gợi ý: {item.suggestion}
+                  </div>
+                  <button 
+                    onClick={() => onFixItem(item)}
+                    className="p-2 bg-brand-primary text-white rounded hover:bg-blue-700 transition-colors shadow-sm"
+                    title="Áp dụng sửa lỗi"
+                  >
+                    <CheckCheck className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
-            </div>
-          ))
+            ))
         )}
       </div>
 
