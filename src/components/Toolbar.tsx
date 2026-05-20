@@ -1,4 +1,4 @@
-import { FileUp, Download, ScrollText, CheckSquare, ShieldCheck, Clipboard } from "lucide-react";
+import { FileUp, Download, ScrollText, CheckSquare, ShieldCheck, Clipboard, History } from "lucide-react";
 import React from "react";
 
 interface ToolbarProps {
@@ -7,9 +7,11 @@ interface ToolbarProps {
   onSetMode: (mode: string) => void;
   currentMode: string;
   onPasteClick: () => void;
+  onHistoryClick: () => void;
+  historyCount: number;
 }
 
-export default function Toolbar({ onUpload, onDownload, onSetMode, currentMode, onPasteClick }: ToolbarProps) {
+export default function Toolbar({ onUpload, onDownload, onSetMode, currentMode, onPasteClick, onHistoryClick, historyCount }: ToolbarProps) {
   const modes = [
     { id: "nd30-report", label: "Báo cáo NĐ 30", icon: <ScrollText className="w-4 h-4 mr-2" /> },
     { id: "nd30-decision", label: "Quyết định NĐ 30", icon: <CheckSquare className="w-4 h-4 mr-2" /> },
@@ -44,6 +46,18 @@ export default function Toolbar({ onUpload, onDownload, onSetMode, currentMode, 
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={onHistoryClick}
+            className="flex items-center px-4 py-2 bg-white text-brand-text border border-brand-border rounded-md hover:bg-brand-bg cursor-pointer transition-all text-[13px] font-medium relative"
+          >
+            <History className="w-4 h-4 mr-2 text-slate-500" />
+            Lịch sử
+            {historyCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-brand-primary text-white text-[10px] font-bold rounded-full flex items-center justify-center border-2 border-brand-sidebar shadow-sm">
+                {historyCount}
+              </span>
+            )}
+          </button>
           <button
             onClick={onPasteClick}
             className="flex items-center px-4 py-2 bg-white text-brand-text border border-brand-border rounded-md hover:bg-brand-bg cursor-pointer transition-all text-[13px] font-medium"
