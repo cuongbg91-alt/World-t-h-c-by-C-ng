@@ -11,16 +11,7 @@ interface ErrorItem {
   type: string;
 }
 
-interface HistoryItem {
-  id: string;
-  fileName: string;
-  originalText: string;
-  htmlContent: string;
-  errors: ErrorItem[];
-  orientation: "portrait" | "landscape";
-  mode: string;
-  timestamp: number;
-}
+
 
 function replaceTextInHtml(html: string, searchText: string, replacementHtml: string): string {
   if (typeof window === "undefined" || !html || !searchText) return html;
@@ -97,10 +88,7 @@ export default function App() {
   const [pastedText, setPastedText] = useState("");
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
 
-  // State hỗ trợ Lịch sử sử dụng và Xử lý lỗi nâng cao
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
-  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  // State hỗ trợ thông báo lỗi và thành công nâng cao
   const [toast, setToast] = useState<{ type: "success" | "warning" | "error" | "info"; message: string } | null>(null);
 
   const showToast = (type: "success" | "warning" | "error" | "info", message: string) => {
@@ -112,45 +100,10 @@ export default function App() {
     return () => clearTimeout(timer);
   };
 
-  // Tải lịch sử khi khởi chạy ứng dụng
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem("office_proofread_history");
-      if (saved) {
-        setHistory(JSON.parse(saved));
-      }
-    } catch (err) {
-      console.error("Lỗi khi tải lịch sử:", err);
-    }
-  }, []);
-
-  const saveHistoryToStorage = (items: HistoryItem[]) => {
-    localStorage.setItem("office_proofread_history", JSON.stringify(items));
-  };
-
-  const updateHistoryAndState = (nextText: string, nextHtml: string, nextErrors: ErrorItem[]) => {
+  const updateState = (nextText: string, nextHtml: string, nextErrors: ErrorItem[]) => {
     setOriginalText(nextText);
     setHtmlContent(nextHtml);
     setErrors(nextErrors);
-    
-    if (activeHistoryId) {
-      setHistory(prev => {
-        const updated = prev.map(item => {
-          if (item.id === activeHistoryId) {
-            return {
-              ...item,
-              originalText: nextText,
-              htmlContent: nextHtml,
-              errors: nextErrors,
-              timestamp: Date.now()
-            };
-          }
-          return item;
-        });
-        saveHistoryToStorage(updated);
-        return updated;
-      });
-    }
   };
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -160,31 +113,12 @@ export default function App() {
     setFileName(file.name);
     try {
       const { text, html, orientation: detectedOrientation } = await parseDocx(file);
-      const newId = Math.random().toString(36).substring(2, 9);
-      setActiveHistoryId(newId);
       
       setOriginalText(text);
       setHtmlContent(html);
       setOrientation(detectedOrientation);
       setErrors([]);
 
-      // Tạo một bản ghi trong cơ sở lịch sử mới
-      const newItem: HistoryItem = {
-        id: newId,
-        fileName: file.name,
-        originalText: text,
-        htmlContent: html,
-        errors: [],
-        orientation: detectedOrientation,
-        mode,
-        timestamp: Date.now()
-      };
-      
-      setHistory(prev => {
-        const nextHistory = [newItem, ...prev.filter(item => item.fileName !== file.name || item.originalText !== text)];
-        saveHistoryToStorage(nextHistory);
-        return nextHistory;
-      });
       showToast("success", `Đã tải tệp lên thành công: ${file.name}`);
     } catch (error) {
       console.error("Failed to parse docx:", error);
@@ -212,18 +146,6 @@ export default function App() {
 
   const handleOrientationChange = (nextOrientation: "portrait" | "landscape") => {
     setOrientation(nextOrientation);
-    if (activeHistoryId) {
-      setHistory(prev => {
-        const u = prev.map(item => {
-          if (item.id === activeHistoryId) {
-            return { ...item, orientation: nextOrientation };
-          }
-          return item;
-        });
-        saveHistoryToStorage(u);
-        return u;
-      });
-    }
   };
 
   const handlePasteConfirm = (text: string) => {
@@ -241,9 +163,6 @@ export default function App() {
       return `<p class="text-justify">${escaped}</p>`;
     }).join('\n');
 
-    const newId = Math.random().toString(36).substring(2, 9);
-    setActiveHistoryId(newId);
-
     setOriginalText(text);
     setHtmlContent(html);
     const customName = `Văn bản dán (${new Date().toLocaleTimeString("vi-VN", { hour: '2-digit', minute: '2-digit' })})`;
@@ -252,22 +171,6 @@ export default function App() {
     setOrientation("portrait");
     setIsPasteModalOpen(false);
     setPastedText("");
-
-    const newItem: HistoryItem = {
-      id: newId,
-      fileName: customName,
-      originalText: text,
-      htmlContent: html,
-      errors: [],
-      orientation: "portrait",
-      mode,
-      timestamp: Date.now()
-    };
-    setHistory(prev => {
-      const nextHistory = [newItem, ...prev];
-      saveHistoryToStorage(nextHistory);
-      return nextHistory;
-    });
     
     showToast("success", "Đã nạp văn bản tự soạn thảo từ clipboard.");
   };
@@ -332,22 +235,7 @@ export default function App() {
                   setErrors(prev => {
                     const existingKeys = new Set(prev.map(e => `${e.text}-${e.error}-${e.suggestion}`));
                     const uniqueNew = data.errors.filter((e: any) => !existingKeys.has(`${e.text}-${e.error}-${e.suggestion}`));
-                    const updatedErrors = [...prev, ...uniqueNew];
-                    
-                    // Đồng bộ đồng thời vào bản ghi lưu lịch sử
-                    if (activeHistoryId) {
-                      setHistory(hPrev => {
-                        const uHistory = hPrev.map(item => {
-                          if (item.id === activeHistoryId) {
-                            return { ...item, errors: updatedErrors };
-                          }
-                          return item;
-                        });
-                        saveHistoryToStorage(uHistory);
-                        return uHistory;
-                      });
-                    }
-                    return updatedErrors;
+                    return [...prev, ...uniqueNew];
                   });
                 }
               } else if (data.type === "warning") {
@@ -371,21 +259,7 @@ export default function App() {
             setErrors(prev => {
               const existingKeys = new Set(prev.map(e => `${e.text}-${e.error}-${e.suggestion}`));
               const uniqueNew = data.errors.filter((e: any) => !existingKeys.has(`${e.text}-${e.error}-${e.suggestion}`));
-              const updatedErrors = [...prev, ...uniqueNew];
-              
-              if (activeHistoryId) {
-                setHistory(hPrev => {
-                  const uHistory = hPrev.map(item => {
-                    if (item.id === activeHistoryId) {
-                      return { ...item, errors: updatedErrors };
-                    }
-                    return item;
-                  });
-                  saveHistoryToStorage(uHistory);
-                  return uHistory;
-                });
-              }
-              return updatedErrors;
+              return [...prev, ...uniqueNew];
             });
           } else if (data.type === "error") {
             showToast("error", `Lỗi từ AI: ${data.error}`);
@@ -423,7 +297,7 @@ export default function App() {
     const nextText = originalText.replace(regex, error.suggestion);
     const nextErrors = errors.filter((_, i) => i !== index);
 
-    updateHistoryAndState(nextText, nextHtml, nextErrors);
+    updateState(nextText, nextHtml, nextErrors);
   };
 
   const fixAll = () => {
@@ -441,41 +315,8 @@ export default function App() {
       newText = newText.replace(regex, error.suggestion);
     });
 
-    updateHistoryAndState(newText, newHtml, []);
+    updateState(newText, newHtml, []);
     showToast("success", "Đã sửa đổi áp dụng tự động toàn bộ lỗi được đề xuất!");
-  };
-
-  const loadHistoryItem = (item: HistoryItem) => {
-    setActiveHistoryId(item.id);
-    setFileName(item.fileName);
-    setOriginalText(item.originalText);
-    setHtmlContent(item.htmlContent);
-    setErrors(item.errors);
-    setOrientation(item.orientation);
-    setMode(item.mode);
-    setIsHistoryOpen(false);
-    showToast("success", `Khôi phục thành công phiên soát: ${item.fileName}`);
-  };
-
-  const deleteHistoryItem = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    const updated = history.filter(item => item.id !== id);
-    setHistory(updated);
-    saveHistoryToStorage(updated);
-    
-    if (activeHistoryId === id) {
-      setActiveHistoryId(null);
-    }
-    showToast("info", "Đã xóa bản ghi được chọn khỏi lịch sử.");
-  };
-
-  const clearAllHistory = () => {
-    if (window.confirm("Bạn có tin tưởng chắc chắn muốn xóa sạch toàn bộ lịch sử rà soát hay không?")) {
-      setHistory([]);
-      saveHistoryToStorage([]);
-      setActiveHistoryId(null);
-      showToast("info", "Đã dọn dẹp sạch sẽ toàn bộ kho dữ liệu lịch sử sử dụng.");
-    }
   };
 
   const handleLearn = async (content: string) => {
@@ -500,8 +341,6 @@ export default function App() {
         onSetMode={setMode} 
         currentMode={mode} 
         onPasteClick={() => setIsPasteModalOpen(true)}
-        onHistoryClick={() => setIsHistoryOpen(true)}
-        historyCount={history.length}
       />
       <div className="flex flex-1 overflow-hidden">
         <TextView 
@@ -602,115 +441,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Modal Lịch sử sử dụng */}
-      {isHistoryOpen && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-40 animate-fade-in animate-duration-150">
-          <div className="bg-white rounded-xl shadow-2xl p-6 w-[750px] max-w-[95vw] border border-brand-border flex flex-col max-h-[85vh] transition-all">
-            <div className="flex items-center justify-between pb-3 border-b border-brand-border mb-4">
-              <h3 className="text-[15px] font-bold text-slate-800 flex items-center gap-2">
-                <span className="text-lg">⏳</span> Lịch sử rà soát văn bản
-              </h3>
-              <div className="flex items-center gap-4">
-                {history.length > 0 && (
-                  <button
-                    onClick={clearAllHistory}
-                    className="text-xs text-red-500 hover:text-red-700 font-semibold transition-colors hover:underline"
-                  >
-                    Xóa tất cả
-                  </button>
-                )}
-                <button 
-                  onClick={() => setIsHistoryOpen(false)}
-                  className="text-slate-400 hover:text-slate-600 p-1 text-2xl leading-none transition-all outline-none select-none"
-                >
-                  &times;
-                </button>
-              </div>
-            </div>
 
-            <div className="flex-1 overflow-auto min-h-0 py-2 space-y-3">
-              {history.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-20 text-slate-400">
-                  <span className="text-5xl opacity-40 mb-4 select-none">🕒</span>
-                  <p className="text-[13px] font-semibold text-slate-500">Chưa ghi nhận lịch sử nào</p>
-                  <p className="text-xs text-slate-400/80 mt-1 max-w-[360px] text-center leading-relaxed font-normal">
-                    Các tệp tin bạn tải lên hoặc soạn thảo trực tiếp sẽ tự động được đồng bộ lưu trữ tại đây để bạn khôi phục và tiếp tục sửa lỗi bất kỳ lúc nào.
-                  </p>
-                </div>
-              ) : (
-                history.map((item) => (
-                  <div
-                    key={item.id}
-                    onClick={() => loadHistoryItem(item)}
-                    className={`group border rounded-xl p-4 cursor-pointer transition-all flex items-center justify-between text-left ${
-                      activeHistoryId === item.id
-                        ? "bg-blue-50/60 border-blue-200 shadow-sm"
-                        : "bg-white border-slate-100 hover:border-slate-300 hover:bg-slate-50/50"
-                    }`}
-                  >
-                    <div className="flex-1 min-w-0 pr-4">
-                      <div className="flex items-center gap-2.5 mb-1.5 flex-wrap">
-                        <span className="text-sm shrink-0 select-none">
-                          {item.fileName.endsWith(".docx") ? "📄" : "📝"}
-                        </span>
-                        <span className="font-bold text-[13px] text-slate-700 truncate max-w-[350px]">
-                          {item.fileName}
-                        </span>
-                        {activeHistoryId === item.id && (
-                          <span className="bg-emerald-100 text-emerald-700 text-[9px] font-bold px-2 py-0.5 rounded-full shrink-0 select-none uppercase tracking-wider">
-                            Đang mở
-                          </span>
-                        )}
-                        <span className="bg-slate-100 text-slate-600 text-[9px] font-semibold px-2 py-0.5 rounded shrink-0 select-none">
-                          {item.mode === "nd30-report" ? "NĐ 30 Báo cáo" : item.mode === "nd30-decision" ? "NĐ 30 Quyết định" : "HD 36"}
-                        </span>
-                      </div>
-                      
-                      <div className="flex items-center gap-3 text-xs text-slate-400 font-medium">
-                        <span>
-                          {new Date(item.timestamp).toLocaleDateString("vi-VN")} {new Date(item.timestamp).toLocaleTimeString("vi-VN", { hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                        <span className="w-1 h-1 rounded-full bg-slate-300"></span>
-                        <span>
-                          Khổ: {item.orientation === "landscape" ? "Ngang" : "Đứng"}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-4 shrink-0">
-                      <div className="text-right">
-                        <div className={`text-xs font-bold px-2.5 py-1 rounded-full ${
-                          item.errors.length > 0 
-                            ? "text-red-600 bg-red-50 border border-red-100" 
-                            : "text-emerald-700 bg-emerald-50 border border-emerald-100"
-                        }`}>
-                          {item.errors.length > 0 ? `${item.errors.length} lỗi` : "Sạch lỗi"}
-                        </div>
-                      </div>
-                      <button
-                        onClick={(e) => deleteHistoryItem(item.id, e)}
-                        className="opacity-0 group-hover:opacity-100 hover:bg-red-50 p-2 rounded-lg text-slate-400 hover:text-red-500 transition-all cursor-pointer select-none font-bold"
-                        title="Xóa khỏi lịch sử"
-                      >
-                        🗑️
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-
-            <div className="flex justify-end border-t border-brand-border pt-4 mt-2 shrink-0">
-              <button
-                onClick={() => setIsHistoryOpen(false)}
-                className="px-5 py-2 bg-slate-100 hover:bg-slate-200 rounded-md transition-all text-xs font-semibold text-slate-600 outline-none"
-              >
-                Đóng
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
