@@ -186,7 +186,13 @@ app.post("/api/proofread", async (req, res) => {
 
     // Đọc kiến thức đã học
     const knowledgeData = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
-    const knowledgeString = knowledgeData.learnedRules.join("\n");
+    const knowledgeRulesList = (knowledgeData.learnedRules || []).map((rule: any) => {
+      if (typeof rule === "string") {
+        return rule;
+      }
+      return `[Nguồn: ${rule.source || "Thủ công"}] Thể loại: ${rule.category || "Chung"}. Quy tắc định dạng hoặc ngữ pháp: ${rule.content}`;
+    });
+    const knowledgeString = knowledgeRulesList.slice(0, 50).join("\n");
 
 function cleanJsonNewlines(jsonStr: string): string {
   let insideString = false;
@@ -402,15 +408,242 @@ function parseRobustJsonArray(text: string): any[] {
   }
 });
 
+async function generateContentForLearning(prompt: string): Promise<string> {
+  if (!process.env.GEMINI_API_KEY) {
+    const keyError = new Error("Cơ sở dữ liệu đang thiếu cấu hình khoá bảo mật (GEMINI_API_KEY).") as any;
+    keyError.status = 401;
+    throw keyError;
+  }
+
+  const modelsToTry = [
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-flash-latest"
+  ];
+  let lastError: any = null;
+
+  for (const modelName of modelsToTry) {
+    let retries = 2;
+    while (retries > 0) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          config: {
+            temperature: 0.2,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  category: {
+                    type: Type.STRING,
+                    description: "Thể loại quy tắc (ví dụ: Định dạng, Chính tả & Ngữ pháp, Văn phong, Logic)."
+                  },
+                  content: {
+                    type: Type.STRING,
+                    description: "Nội dung chi tiết súc tích, thực tiễn nhất của quy tắc học được từ nguồn."
+                  }
+                },
+                required: ["category", "content"]
+              }
+            }
+          }
+        });
+
+        if (response && response.text) {
+          return response.text;
+        }
+        throw new Error("Phản hồi tự học bị trống");
+      } catch (err: any) {
+        lastError = err;
+        retries--;
+        if (retries > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error("Không thể gọi thư viện AI để học quy chuẩn.");
+}
+
 app.post("/api/learn", async (req, res) => {
   try {
     const { content } = req.body;
     const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
-    data.learnedRules.push(content);
+    const newRule = {
+      id: `${Math.random().toString(36).substring(2, 9)}-${Date.now()}`,
+      category: "Quy chuẩn",
+      source: "Xử lý thủ công",
+      content,
+      createdAt: new Date().toISOString()
+    };
+    data.learnedRules.push(newRule);
+    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+    res.json({ success: true, rule: newRule });
+  } catch (error) {
+    res.status(500).json({ error: "Learning failed" });
+  }
+});
+
+app.get("/api/learned-rules", async (req, res) => {
+  try {
+    const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    const list = data.learnedRules || [];
+    
+    // Bảo vệ & chuẩn hóa dữ liệu cũ (nếu có chuỗi thường) sang đối tượng có cấu trúc
+    let modified = false;
+    const structuredList = list.map((item: any) => {
+      if (typeof item === "string") {
+        modified = true;
+        return {
+          id: `${Math.random().toString(36).substring(2, 9)}-${Date.now()}`,
+          category: "Quy chuẩn",
+          source: "Thủ công",
+          content: item,
+          createdAt: new Date().toISOString()
+        };
+      }
+      if (!item.id) {
+        modified = true;
+        item.id = `${Math.random().toString(36).substring(2, 9)}-${Date.now()}`;
+      }
+      return item;
+    });
+
+    if (modified) {
+      data.learnedRules = structuredList;
+      await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+    }
+
+    res.json({ success: true, learnedRules: structuredList });
+  } catch (error) {
+    res.status(500).json({ error: "Không thể lấy danh sách kiến thức đã học." });
+  }
+});
+
+app.post("/api/learned-rules", async (req, res) => {
+  try {
+    const { content, category, source } = req.body;
+    if (!content) {
+      return res.status(400).json({ error: "Nội dung quy định không được để trống." });
+    }
+
+    const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    if (!data.learnedRules) {
+      data.learnedRules = [];
+    }
+
+    const newRule = {
+      id: `${Math.random().toString(36).substring(2, 9)}-${Date.now()}`,
+      category: category || "Quy chuẩn",
+      source: source || "Thủ công",
+      content,
+      createdAt: new Date().toISOString()
+    };
+
+    data.learnedRules.push(newRule);
+    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+    res.json({ success: true, rule: newRule });
+  } catch (error) {
+    res.status(500).json({ error: "Không thể thêm quy trình tự học mới." });
+  }
+});
+
+app.put("/api/learned-rules/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content, category, source } = req.body;
+    
+    const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    const list = data.learnedRules || [];
+    
+    const index = list.findIndex((r: any) => r && r.id === id);
+    if (index === -1) {
+      return res.status(404).json({ error: "Không tìm thấy quy tắc cần cập nhật." });
+    }
+
+    list[index] = {
+      ...list[index],
+      content: content !== undefined ? content : list[index].content,
+      category: category !== undefined ? category : list[index].category,
+      source: source !== undefined ? source : list[index].source,
+      updatedAt: new Date().toISOString()
+    };
+
+    data.learnedRules = list;
+    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+    res.json({ success: true, rule: list[index] });
+  } catch (error) {
+    res.status(500).json({ error: "Cập nhật quy tắc thất bại." });
+  }
+});
+
+app.delete("/api/learned-rules/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    const list = data.learnedRules || [];
+    
+    const filtered = list.filter((r: any) => r && r.id !== id);
+    data.learnedRules = filtered;
+    
     await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
     res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ error: "Learning failed" });
+    res.status(500).json({ error: "Xóa quy tắc thất bại." });
+  }
+});
+
+app.post("/api/analyze-and-learn", async (req, res) => {
+  try {
+    const { source } = req.body;
+    if (!source) {
+      return res.status(400).json({ error: "Thiếu thông tin nguồn tài liệu học." });
+    }
+
+    const prompt = `
+      Bạn là một AI chuyên gia huấn luyện hành chính công vụ Việt Nam chuyên sâu về Hướng dẫn 36, Nghị định 30, chinhphu.vn, dienbien.gov.vn.
+      Hãy phân tích nguồn quy chuẩn tài liệu: "${source}"
+      Hãy đúc kết ra đúng 2 đến 3 quy tắc thiết thực về mặt Định dạng (font chữ Times New Roman, độ thụt đầu dòng lề lùi dòng indentation, giãn dòng giãn khoảng cách spacing, cách gõ phím tab) hoặc chính tả quy định viết hoa, cách dùng từ hành chính địa phương Việt Nam đặc thù của nguồn này.
+      Các quy luật cần rất súc tích, thực tiễn có tính áp dụng cực kỳ cao để rà soát văn bản bằng AI ở các lần sau.
+
+      YÊU CẦU ĐẦU RA:
+      Trả về danh sách 2-3 đối tượng quy tắc dưới dạng JSON Array (chỉ chứa mảng các quy tắc, tuân theo lược đồ mẫu).
+    `;
+
+    // Gọi Gemini để học từ nguồn tài liệu này
+    const responseText = await generateContentForLearning(prompt);
+    const parsedRules = JSON.parse(responseText);
+
+    const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    if (!data.learnedRules) {
+      data.learnedRules = [];
+    }
+
+    const addedRules: any[] = [];
+    if (Array.isArray(parsedRules)) {
+      for (const rule of parsedRules) {
+        const newRule = {
+          id: `${Math.random().toString(36).substring(2, 9)}-${Date.now()}`,
+          category: rule.category || "Quy chuẩn",
+          source: source,
+          content: rule.content || "",
+          createdAt: new Date().toISOString()
+        };
+        data.learnedRules.push(newRule);
+        addedRules.push(newRule);
+      }
+    }
+
+    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+    res.json({ success: true, addedRules });
+  } catch (error: any) {
+    console.error("Analysis learning failed:", error);
+    res.status(500).json({ error: error.message || "Quá trình AI tự học từ nguồn này gặp sự cố." });
   }
 });
 

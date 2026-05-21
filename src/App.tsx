@@ -92,6 +92,102 @@ export default function App() {
 
   // State hỗ trợ thông báo lỗi và thành công nâng cao
   const [toast, setToast] = useState<{ type: "success" | "warning" | "error" | "info"; message: string } | null>(null);
+  const [learnedRules, setLearnedRules] = useState<any[]>([]);
+
+  const fetchLearnedRules = async () => {
+    try {
+      const res = await fetch("/api/learned-rules");
+      const data = await res.json();
+      if (data.success) {
+        setLearnedRules(data.learnedRules);
+      }
+    } catch (e) {
+      console.error("Lỗi lấy danh sách tự học:", e);
+    }
+  };
+
+  useEffect(() => {
+    fetchLearnedRules();
+  }, []);
+
+  const handleAddRule = async (content: string, category: string, source: string) => {
+    try {
+      const res = await fetch("/api/learned-rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, category, source }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast("success", "Đã lưu quy định bổ sung thủ công thành công!");
+        fetchLearnedRules();
+      } else {
+        showToast("error", data.error || "Không thể lưu quy định bổ sung.");
+      }
+    } catch (e) {
+      console.error(e);
+      showToast("error", "Lỗi kết nối máy chủ khi lưu quy định.");
+    }
+  };
+
+  const handleEditRule = async (id: string, content: string, category: string, source: string) => {
+    try {
+      const res = await fetch(`/api/learned-rules/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, category, source }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast("success", "Đã cập nhật quy định thành công!");
+        fetchLearnedRules();
+      } else {
+        showToast("error", data.error || "Không thể cập nhật quy tắc.");
+      }
+    } catch (e) {
+      console.error(e);
+      showToast("error", "Lỗi kết nối máy chủ khi cập nhật.");
+    }
+  };
+
+  const handleDeleteRule = async (id: string) => {
+    try {
+      const res = await fetch(`/api/learned-rules/${id}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast("success", "Đã xóa quy định tự học!");
+        fetchLearnedRules();
+      } else {
+        showToast("error", data.error || "Không thể xoá quy chuẩn.");
+      }
+    } catch (e) {
+      console.error(e);
+      showToast("error", "Lỗi kết nối máy chủ khi xoá.");
+    }
+  };
+
+  const handleAnalyzeSource = async (source: string) => {
+    try {
+      showToast("info", `AI đang rà quét và phân tích học tập quy chuẩn từ ${source}...`);
+      const res = await fetch("/api/analyze-and-learn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast("success", `AI đã học thành công ${data.addedRules?.length || 0} quy tắc chất lượng từ ${source}!`);
+        fetchLearnedRules();
+      } else {
+        showToast("error", data.error || "AI phân tích tự học gặp sự cố.");
+      }
+    } catch (e) {
+      console.error(e);
+      showToast("error", "Lỗi gửi kết nối yêu cầu AI tự học.");
+    }
+  };
 
   const showToast = (type: "success" | "warning" | "error" | "info", message: string) => {
     setToast({ type, message });
@@ -374,6 +470,11 @@ export default function App() {
           onLinkToItem={(item) => setHighlightedError({ ...item, id: Math.random() })}
           onLearn={handleLearn}
           isChecking={isChecking}
+          learnedRules={learnedRules}
+          onAddRule={handleAddRule}
+          onEditRule={handleEditRule}
+          onDeleteRule={handleDeleteRule}
+          onAnalyzeSource={handleAnalyzeSource}
         />
       </div>
 
