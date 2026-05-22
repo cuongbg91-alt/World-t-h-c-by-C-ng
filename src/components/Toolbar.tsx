@@ -54,7 +54,7 @@ export default function Toolbar({ onUpload, onDownload, onSetMode, currentMode, 
           <label className="flex items-center px-4 py-2 bg-white text-brand-text border border-brand-border rounded-md hover:bg-brand-bg cursor-pointer transition-all text-[13px] font-medium">
             <FileUp className="w-4 h-4 mr-2" />
             Tải tệp lên
-            <input type="file" className="hidden" accept=".docx" onChange={onUpload} />
+            <input type="file" className="hidden" accept=".docx,.doc" onChange={onUpload} />
           </label>
           <button
             onClick={onDownload}

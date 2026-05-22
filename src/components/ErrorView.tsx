@@ -72,6 +72,7 @@ export default function ErrorView({
   const [trainingSource, setTrainingSource] = useState<string | null>(null);
 
   const predefinedSources = [
+    { name: "Nghị định 150/2025/NĐ-CP", desc: "Quy chế mới về hồ sơ điện tử, kết nối chia sẻ dữ liệu số & định danh văn bản trực tuyến" },
     { name: "Nghị định 30/2020/NĐ-CP", desc: "Quy chuẩn văn bản hành chính nhà nước, font, lề dãn khoảng cách" },
     { name: "Hướng dẫn 36-HD/VPTW", desc: "Quy thế trình bày văn bản Đảng cao cấp, tiêu đề và phông chữ" },
     { name: "chinhphu.vn", desc: "Chuẩn văn phong thông tấn chính phủ, thuật ngữ quốc gia thống nhất" },

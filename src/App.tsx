@@ -210,17 +210,49 @@ export default function App() {
 
     setFileName(file.name);
     try {
-      const { text, html, orientation: detectedOrientation } = await parseDocx(file);
-      
-      setOriginalText(text);
-      setHtmlContent(html);
-      setOrientation(detectedOrientation);
-      setErrors([]);
+      if (file.name.toLowerCase().endsWith(".doc")) {
+        showToast("info", "Đang xử lý bóc tách định dạng Word 97 - 2003 (.doc)...");
+        
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const result = reader.result as string;
+            const b64 = result.split(',')[1];
+            resolve(b64);
+          };
+          reader.onerror = (err) => reject(err);
+          reader.readAsDataURL(file);
+        });
 
-      showToast("success", `Đã tải tệp lên thành công: ${file.name}`);
+        const res = await fetch("/api/parse-doc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base64, filename: file.name }),
+        });
+        const data = await res.json();
+        
+        if (data.success) {
+          setOriginalText(data.text);
+          setHtmlContent(data.html);
+          setOrientation(data.orientation || "portrait");
+          setErrors([]);
+          showToast("success", `Đã tải tệp lên thành công: ${file.name}`);
+        } else {
+          showToast("error", data.error || "Không thể nạp nội dung của file .doc này.");
+        }
+      } else {
+        const { text, html, orientation: detectedOrientation } = await parseDocx(file);
+        
+        setOriginalText(text);
+        setHtmlContent(html);
+        setOrientation(detectedOrientation);
+        setErrors([]);
+
+        showToast("success", `Đã tải tệp lên thành công: ${file.name}`);
+      }
     } catch (error) {
-      console.error("Failed to parse docx:", error);
-      showToast("error", "Không thể bóc tách nội dung của file docx này. Vui lòng chắc chắn file không bị lỗi.");
+      console.error("Failed to parse file:", error);
+      showToast("error", "Không thể bóc tách nội dung của tệp này. Vui lòng chắc chắn file không bị lỗi.");
     }
   };
 
@@ -231,9 +263,16 @@ export default function App() {
     }
     try {
       const htmlToSave = document.getElementById('word-content')?.innerHTML || htmlContent;
-      const outputName = fileName
-        ? (fileName.endsWith('.docx') ? fileName.replace('.docx', '_da_soat.docx') : fileName + '_da_soat.docx')
-        : 'van_ban_da_soat.docx';
+      let outputName = "van_ban_da_soat.docx";
+      if (fileName) {
+        if (fileName.endsWith('.docx')) {
+          outputName = fileName.replace('.docx', '_da_soat.docx');
+        } else if (fileName.endsWith('.doc')) {
+          outputName = fileName.replace('.doc', '_da_soat.docx');
+        } else {
+          outputName = fileName + '_da_soat.docx';
+        }
+      }
       await generateDocx(htmlToSave, outputName, orientation);
       showToast("success", "Xuất file DOCX rà duyệt hoàn chỉnh thành công!");
     } catch (error) {
@@ -301,6 +340,24 @@ export default function App() {
         body: JSON.stringify({ text: textToProcess, mode }),
       });
 
+      if (!response.ok) {
+        let errorMessage = "Đã xảy ra lỗi khi yêu cầu rà soát văn bản.";
+        try {
+          const errData = await response.json();
+          if (errData && errData.error) {
+            errorMessage = errData.error;
+          }
+        } catch (_) {
+          try {
+            const errText = await response.clone().text();
+            if (errText && errText.length < 200) {
+              errorMessage = errText;
+            }
+          } catch (__) {}
+        }
+        throw new Error(errorMessage);
+      }
+
       if (!response.body) {
         throw new Error("Trình duyệt không hỗ trợ đọc luồng dữ liệu.");
       }
@@ -314,6 +371,8 @@ export default function App() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
+        // Chuẩn hóa khoảng xuống dòng để thống nhất các nền tảng
+        buffer = buffer.replace(/\r\n/g, "\n");
         
         let boundary = buffer.indexOf("\n\n");
         while (boundary !== -1) {

@@ -4,6 +4,7 @@ import express from "express";
 import fs from "fs/promises";
 import path from "path";
 import { createServer as createViteServer } from "vite";
+import WordExtractor from "word-extractor";
 
 dotenv.config();
 
@@ -22,24 +23,156 @@ async function ensureKnowledgeFile() {
   }
 }
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
+async function readKnowledgeFile() {
+  try {
+    const data = await fs.readFile(KNOWLEDGE_PATH, "utf-8");
+    if (!data.trim()) {
+      return { learnedRules: [] };
+    }
+    return JSON.parse(data);
+  } catch (error) {
+    console.warn("Knowledge file corrupted or unreadable. Resetting to default dynamic rules context.", error);
+    return { learnedRules: [] };
+  }
+}
+
+let aiClient: GoogleGenAI | null = null;
+function getAIClient(): GoogleGenAI {
+  if (!aiClient) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      const keyError = new Error(
+        "Cơ sở dữ liệu đang thiếu cấu hình khoá bảo mật (GEMINI_API_KEY). Quý khách hãy thiết lập API Key trong phần Settings (góc trên cùng bên phải giao diện ứng dụng) để tiếp tục."
+      ) as any;
+      keyError.status = 401;
+      throw keyError;
+    }
+    aiClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
+  }
+  return aiClient;
+}
+
+function cleanJsonNewlines(jsonStr: string): string {
+  let insideString = false;
+  let result = "";
+  for (let i = 0; i < jsonStr.length; i++) {
+    const char = jsonStr[i];
+    if (char === '"' && (i === 0 || jsonStr[i - 1] !== '\\')) {
+      insideString = !insideString;
+      result += char;
+    } else if (insideString && (char === '\n' || char === '\r')) {
+      result += " "; // Thay thế xuống dòng thực tế bằng khoảng trắng để tránh lỗi cú pháp JSON
+    } else if (insideString && char === '\t') {
+      result += " "; // Thay thế tab thực tế bằng khoảng trắng để tránh lỗi cú pháp JSON
+    } else {
+      result += char;
     }
   }
-});
+  return result;
+}
+
+function parseRobustJsonArray(text: string): any[] {
+  let cleaned = text.trim();
+  
+  // Loại bỏ Markdown codeblock nếu có
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  }
+
+  // 1. Thử parse nguyên bản sau khi đã dọn dẹp ký tự xuống dòng thực tế
+  try {
+    const cleanStr = cleanJsonNewlines(cleaned);
+    const parsed = JSON.parse(cleanStr);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === "object") return [parsed];
+  } catch (err) {
+    console.warn("JSON.parse trực tiếp thất bại, đang chuyển sang các bộ lọc phục hồi...", err);
+  }
+
+  // 2. Trích xuất tất cả các khối {...} bằng Regex nhiều dòng
+  const objectRegex = /\{[\s\S]*?\}/g;
+  const matches = cleaned.match(objectRegex);
+  if (matches && matches.length > 0) {
+    const list: any[] = [];
+    for (const match of matches) {
+      try {
+        const cleanItemStr = cleanJsonNewlines(match);
+        const item = JSON.parse(cleanItemStr);
+        if (item && item.text) {
+          list.push(item);
+        }
+      } catch (e) {
+        // Thử dọn dẹp thêm các lỗi sai cấu trúc nhỏ khác nếu có thể
+        try {
+          let fixedMatch = match.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
+          fixedMatch = cleanJsonNewlines(fixedMatch);
+          const item = JSON.parse(fixedMatch);
+          if (item && item.text) {
+            list.push(item);
+          }
+        } catch (_) {}
+      }
+    }
+    if (list.length > 0) {
+      return list;
+    }
+  }
+
+  // 3. Thử sửa chữa ngoặc dở dang theo thuật toán đếm ngoặc
+  let repaired = cleaned;
+  try {
+    if (repaired.endsWith(",")) {
+      repaired = repaired.substring(0, repaired.length - 1);
+    }
+    let openBraces = (repaired.match(/\{/g) || []).length;
+    let closeBraces = (repaired.match(/\}/g) || []).length;
+    let openBrackets = (repaired.match(/\[/g) || []).length;
+    let closeBrackets = (repaired.match(/\]/g) || []).length;
+
+    while (openBraces > closeBraces) {
+      repaired += "}";
+      closeBraces++;
+    }
+    while (openBrackets > closeBrackets) {
+      repaired += "]";
+      closeBrackets++;
+    }
+    
+    const parsed = JSON.parse(cleanJsonNewlines(repaired));
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === "object") return [parsed];
+  } catch (e) {
+    // Thất bại
+  }
+
+  // 4. Giải pháp cuối cùng: Quét lấy tất cả các cặp thuộc tính bằng Regex
+  const errors: any[] = [];
+  try {
+    const itemPattern = /"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"error"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"suggestion"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"type"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
+    let match;
+    while ((match = itemPattern.exec(cleaned)) !== null) {
+      errors.push({
+        text: match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+        error: match[2].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+        suggestion: match[3].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+        type: match[4].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+      });
+    }
+  } catch (_) {}
+
+  return errors;
+}
 
 // Hàm hỗ trợ gọi Gemini với cơ chế thử lại và chuyển đổi mô hình dự phòng khi gặp lỗi
 async function generateContentWithRetryAndFallback(prompt: string): Promise<string> {
-  if (!process.env.GEMINI_API_KEY) {
-    const keyError = new Error(
-      "Cơ sở dữ liệu đang thiếu cấu hình khoá bảo mật (GEMINI_API_KEY). Quý khách hãy thiết lập API Key trong phần Settings (góc trên cùng bên phải giao diện ứng dụng) để tiếp tục."
-    ) as any;
-    keyError.status = 401;
-    throw keyError;
-  }
+  const ai = getAIClient();
 
   const modelsToTry = [
     "gemini-3.5-flash",      // Mô hình thế hệ mới nhất, thông minh vượt trội, cực kỳ ổn định và ưu việt cho rà soát JSON
@@ -171,6 +304,46 @@ async function generateContentWithRetryAndFallback(prompt: string): Promise<stri
   throw finalError;
 }
 
+app.post("/api/parse-doc", async (req, res) => {
+  try {
+    const { base64, filename } = req.body;
+    if (!base64) {
+      return res.status(400).json({ error: "Không tìm thấy dữ liệu tệp tin." });
+    }
+
+    const buffer = Buffer.from(base64, "base64");
+    const extractor = new WordExtractor();
+    const doc = await extractor.extract(buffer);
+    const text = doc.getBody();
+
+    // Phân tách văn bản theo các dòng để tạo cấu trúc paragraphs sạch sẽ
+    const paragraphs = text.split(/\r?\n/);
+    const htmlLines = paragraphs.map(p => {
+      const trimmed = p.trim();
+      if (!trimmed) {
+        return "";
+      }
+      const escaped = trimmed
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      return `<p class="text-justify">${escaped}</p>`;
+    }).filter(line => line !== "");
+
+    const html = htmlLines.join("\n");
+
+    res.json({
+      success: true,
+      text,
+      html,
+      orientation: "portrait"
+    });
+  } catch (error: any) {
+    console.error("Lỗi khi giải mã tệp tin .doc:", error);
+    res.status(500).json({ error: "Giải nén tệp tin Word 97 - 2003 (.doc) thất bại. Vui lòng đảm bảo tệp tin không bị lỗi hoặc thử chuyển hướng lưu dạng .docx." });
+  }
+});
+
 app.post("/api/proofread", async (req, res) => {
   try {
     const { text, mode, learnedContext } = req.body;
@@ -185,7 +358,7 @@ app.post("/api/proofread", async (req, res) => {
     }
 
     // Đọc kiến thức đã học
-    const knowledgeData = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    const knowledgeData = await readKnowledgeFile();
     const knowledgeRulesList = (knowledgeData.learnedRules || []).map((rule: any) => {
       if (typeof rule === "string") {
         return rule;
@@ -193,117 +366,6 @@ app.post("/api/proofread", async (req, res) => {
       return `[Nguồn: ${rule.source || "Thủ công"}] Thể loại: ${rule.category || "Chung"}. Quy tắc định dạng hoặc ngữ pháp: ${rule.content}`;
     });
     const knowledgeString = knowledgeRulesList.slice(0, 50).join("\n");
-
-function cleanJsonNewlines(jsonStr: string): string {
-  let insideString = false;
-  let result = "";
-  for (let i = 0; i < jsonStr.length; i++) {
-    const char = jsonStr[i];
-    if (char === '"' && (i === 0 || jsonStr[i - 1] !== '\\')) {
-      insideString = !insideString;
-      result += char;
-    } else if (insideString && (char === '\n' || char === '\r')) {
-      result += " "; // Thay thế xuống dòng thực tế bằng khoảng trắng để tránh lỗi cú pháp JSON
-    } else if (insideString && char === '\t') {
-      result += " "; // Thay thế tab thực tế bằng khoảng trắng để tránh lỗi cú pháp JSON
-    } else {
-      result += char;
-    }
-  }
-  return result;
-}
-
-function parseRobustJsonArray(text: string): any[] {
-  let cleaned = text.trim();
-  
-  // Loại bỏ Markdown codeblock nếu có
-  if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-  }
-
-  // 1. Thử parse nguyên bản sau khi đã dọn dẹp ký tự xuống dòng thực tế
-  try {
-    const cleanStr = cleanJsonNewlines(cleaned);
-    const parsed = JSON.parse(cleanStr);
-    if (Array.isArray(parsed)) return parsed;
-    if (parsed && typeof parsed === "object") return [parsed];
-  } catch (err) {
-    console.warn("JSON.parse trực tiếp thất bại, đang chuyển sang các bộ lọc phục hồi...", err);
-  }
-
-  // 2. Trích xuất tất cả các khối {...} bằng Regex nhiều dòng
-  const objectRegex = /\{[\s\S]*?\}/g;
-  const matches = cleaned.match(objectRegex);
-  if (matches && matches.length > 0) {
-    const list: any[] = [];
-    for (const match of matches) {
-      try {
-        const cleanItemStr = cleanJsonNewlines(match);
-        const item = JSON.parse(cleanItemStr);
-        if (item && item.text) {
-          list.push(item);
-        }
-      } catch (e) {
-        // Thử dọn dẹp thêm các lỗi sai cấu trúc nhỏ khác nếu có thể
-        try {
-          let fixedMatch = match.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
-          fixedMatch = cleanJsonNewlines(fixedMatch);
-          const item = JSON.parse(fixedMatch);
-          if (item && item.text) {
-            list.push(item);
-          }
-        } catch (_) {}
-      }
-    }
-    if (list.length > 0) {
-      return list;
-    }
-  }
-
-  // 3. Thử sửa chữa ngoặc dở dang theo thuật toán đếm ngoặc
-  let repaired = cleaned;
-  try {
-    if (repaired.endsWith(",")) {
-      repaired = repaired.substring(0, repaired.length - 1);
-    }
-    let openBraces = (repaired.match(/\{/g) || []).length;
-    let closeBraces = (repaired.match(/\}/g) || []).length;
-    let openBrackets = (repaired.match(/\[/g) || []).length;
-    let closeBrackets = (repaired.match(/\]/g) || []).length;
-
-    while (openBraces > closeBraces) {
-      repaired += "}";
-      closeBraces++;
-    }
-    while (openBrackets > closeBrackets) {
-      repaired += "]";
-      closeBrackets++;
-    }
-    
-    const parsed = JSON.parse(cleanJsonNewlines(repaired));
-    if (Array.isArray(parsed)) return parsed;
-    if (parsed && typeof parsed === "object") return [parsed];
-  } catch (e) {
-    // Thất bại
-  }
-
-  // 4. Giải pháp cuối cùng: Quét lấy tất cả các cặp thuộc tính bằng Regex
-  const errors: any[] = [];
-  try {
-    const itemPattern = /"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"error"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"suggestion"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"type"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
-    let match;
-    while ((match = itemPattern.exec(cleaned)) !== null) {
-      errors.push({
-        text: match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
-        error: match[2].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
-        suggestion: match[3].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
-        type: match[4].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
-      });
-    }
-  } catch (_) {}
-
-  return errors;
-}
 
     // Hàm xử lý từng đoạn văn bản
     const processChunk = async (chunkText: string) => {
@@ -409,11 +471,7 @@ function parseRobustJsonArray(text: string): any[] {
 });
 
 async function generateContentForLearning(prompt: string): Promise<string> {
-  if (!process.env.GEMINI_API_KEY) {
-    const keyError = new Error("Cơ sở dữ liệu đang thiếu cấu hình khoá bảo mật (GEMINI_API_KEY).") as any;
-    keyError.status = 401;
-    throw keyError;
-  }
+  const ai = getAIClient();
 
   const modelsToTry = [
     "gemini-3.5-flash",
@@ -473,7 +531,7 @@ async function generateContentForLearning(prompt: string): Promise<string> {
 app.post("/api/learn", async (req, res) => {
   try {
     const { content } = req.body;
-    const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    const data = await readKnowledgeFile();
     const newRule = {
       id: `${Math.random().toString(36).substring(2, 9)}-${Date.now()}`,
       category: "Quy chuẩn",
@@ -491,7 +549,7 @@ app.post("/api/learn", async (req, res) => {
 
 app.get("/api/learned-rules", async (req, res) => {
   try {
-    const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    const data = await readKnowledgeFile();
     const list = data.learnedRules || [];
     
     // Bảo vệ & chuẩn hóa dữ liệu cũ (nếu có chuỗi thường) sang đối tượng có cấu trúc
@@ -532,7 +590,7 @@ app.post("/api/learned-rules", async (req, res) => {
       return res.status(400).json({ error: "Nội dung quy định không được để trống." });
     }
 
-    const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    const data = await readKnowledgeFile();
     if (!data.learnedRules) {
       data.learnedRules = [];
     }
@@ -558,7 +616,7 @@ app.put("/api/learned-rules/:id", async (req, res) => {
     const { id } = req.params;
     const { content, category, source } = req.body;
     
-    const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    const data = await readKnowledgeFile();
     const list = data.learnedRules || [];
     
     const index = list.findIndex((r: any) => r && r.id === id);
@@ -585,7 +643,7 @@ app.put("/api/learned-rules/:id", async (req, res) => {
 app.delete("/api/learned-rules/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    const data = await readKnowledgeFile();
     const list = data.learnedRules || [];
     
     const filtered = list.filter((r: any) => r && r.id !== id);
@@ -606,9 +664,9 @@ app.post("/api/analyze-and-learn", async (req, res) => {
     }
 
     const prompt = `
-      Bạn là một AI chuyên gia huấn luyện hành chính công vụ Việt Nam chuyên sâu về Hướng dẫn 36, Nghị định 30, chinhphu.vn, dienbien.gov.vn.
+      Bạn là một AI chuyên gia huấn luyện hành chính công vụ Việt Nam chuyên sâu về Hướng dẫn 36, Nghị định 30, Nghị định 150/2025/NĐ-CP, chinhphu.vn, dienbien.gov.vn.
       Hãy phân tích nguồn quy chuẩn tài liệu: "${source}"
-      Hãy đúc kết ra đúng 2 đến 3 quy tắc thiết thực về mặt Định dạng (font chữ Times New Roman, độ thụt đầu dòng lề lùi dòng indentation, giãn dòng giãn khoảng cách spacing, cách gõ phím tab) hoặc chính tả quy định viết hoa, cách dùng từ hành chính địa phương Việt Nam đặc thù của nguồn này.
+      Hãy đúc kết ra đúng 2 đến 3 quy tắc thiết thực về mặt Định dạng (font chữ Times New Roman, độ thụt đầu dòng lề lùi dòng lề chữ, giãn dòng giãn khoảng cách spacing, cách gõ phím tab) hoặc chính tả quy định viết hoa, cấu trúc định dạng văn bản hành chính điện tử của nguồn này.
       Các quy luật cần rất súc tích, thực tiễn có tính áp dụng cực kỳ cao để rà soát văn bản bằng AI ở các lần sau.
 
       YÊU CẦU ĐẦU RA:
@@ -617,9 +675,9 @@ app.post("/api/analyze-and-learn", async (req, res) => {
 
     // Gọi Gemini để học từ nguồn tài liệu này
     const responseText = await generateContentForLearning(prompt);
-    const parsedRules = JSON.parse(responseText);
+    const parsedRules = parseRobustJsonArray(responseText);
 
-    const data = JSON.parse(await fs.readFile(KNOWLEDGE_PATH, "utf-8"));
+    const data = await readKnowledgeFile();
     if (!data.learnedRules) {
       data.learnedRules = [];
     }
