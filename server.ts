@@ -5,6 +5,7 @@ import fs from "fs/promises";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import WordExtractor from "word-extractor";
+import mammoth from "mammoth";
 
 dotenv.config();
 
@@ -81,8 +82,11 @@ function cleanJsonNewlines(jsonStr: string): string {
 function parseRobustJsonArray(text: string): any[] {
   let cleaned = text.trim();
   
-  // Loại bỏ Markdown codeblock nếu có
-  if (cleaned.startsWith("```")) {
+  // Trích xuất phần nằm giữa các dải ```json ... ``` hoặc ``` ... ``` nếu có bất kỳ nơi nào trong chuỗi
+  const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (codeBlockMatch) {
+    cleaned = codeBlockMatch[1].trim();
+  } else if (cleaned.startsWith("```")) {
     cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
   }
 
@@ -109,9 +113,10 @@ function parseRobustJsonArray(text: string): any[] {
           list.push(item);
         }
       } catch (e) {
-        // Thử dọn dẹp thêm các lỗi sai cấu trúc nhỏ khác nếu có thể
+        // Thử dọn dẹp thêm các lỗi sai cấu trúc nhỏ khác nếu có thể (chữ viết không bọc ngoặc, nháy đơn)
         try {
-          let fixedMatch = match.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
+          let fixedMatch = match.replace(/'/g, '"');
+          fixedMatch = fixedMatch.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
           fixedMatch = cleanJsonNewlines(fixedMatch);
           const item = JSON.parse(fixedMatch);
           if (item && item.text) {
@@ -152,18 +157,26 @@ function parseRobustJsonArray(text: string): any[] {
     // Thất bại
   }
 
-  // 4. Giải pháp cuối cùng: Quét lấy tất cả các cặp thuộc tính bằng Regex
+  // 4. Giải pháp cuối cùng vững chắc nhất: Quét từng khối {} và lấy các cặp thuộc tính bằng Regex độc lập thứ tự các trường
   const errors: any[] = [];
   try {
-    const itemPattern = /"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"error"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"suggestion"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"type"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
-    let match;
-    while ((match = itemPattern.exec(cleaned)) !== null) {
-      errors.push({
-        text: match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
-        error: match[2].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
-        suggestion: match[3].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
-        type: match[4].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
-      });
+    const objectBlocks = cleaned.match(/\{[\s\S]*?\}/g);
+    if (objectBlocks) {
+      for (const block of objectBlocks) {
+        const textMatch = block.match(/"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/i);
+        const errorMatch = block.match(/"error"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/i);
+        const suggestionMatch = block.match(/"suggestion"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/i);
+        const typeMatch = block.match(/"type"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/i);
+        
+        if (textMatch && errorMatch && suggestionMatch && typeMatch) {
+          errors.push({
+            text: textMatch[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+            error: errorMatch[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+            suggestion: suggestionMatch[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+            type: typeMatch[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
+          });
+        }
+      }
     }
   } catch (_) {}
 
@@ -304,6 +317,96 @@ async function generateContentWithRetryAndFallback(prompt: string): Promise<stri
   throw finalError;
 }
 
+function parseRtfToText(rtfStr: string): string {
+  let cleaned = rtfStr;
+  
+  // 1. Loại bỏ các khối metadata và định nghĩa không có văn bản nhìn thấy được
+  cleaned = cleaned.replace(/\{\\fonttbl[\s\S]*?\}/g, "");
+  cleaned = cleaned.replace(/\{\\colortbl[\s\S]*?\}/g, "");
+  cleaned = cleaned.replace(/\{\\stylesheet[\s\S]*?\}/g, "");
+  cleaned = cleaned.replace(/\{\\\*\\generator[\s\S]*?\}/g, "");
+  cleaned = cleaned.replace(/\{\\\*\\expandedcolortbl[\s\S]*?\}/g, "");
+  cleaned = cleaned.replace(/\{\\\*\\listtable[\s\S]*?\}/g, "");
+  cleaned = cleaned.replace(/\{\\\*\\listoverridetable[\s\S]*?\}/g, "");
+  cleaned = cleaned.replace(/\{\\\*\\revtbl[\s\S]*?\}/g, "");
+  cleaned = cleaned.replace(/\{\\info[\s\S]*?\}/g, "");
+  
+  // 2. Chuyển đổi lệnh phân đoạn RTF thành ký tự xuống dòng
+  cleaned = cleaned.replace(/\\par\b/g, "\n");
+  cleaned = cleaned.replace(/\\line\b/g, "\n");
+  cleaned = cleaned.replace(/\\tab\b/g, "\t");
+
+  // 3. Giải mã các ký tự Unicode dạng \u1234? (Số thập phân có dấu 16-bit)
+  cleaned = cleaned.replace(/\\u(-?\d+)\??/g, (match, decVal) => {
+    let num = parseInt(decVal, 10);
+    if (num < 0) {
+      num += 65536;
+    }
+    return String.fromCharCode(num);
+  });
+
+  // 4. Giải mã các kí tự dạng hex \'xx (Ví dụ \'e1, \'e2...) từ bảng mã tương ứng
+  const win1258Map: { [key: string]: string } = {
+    "e0": "à", "e1": "á", "e2": "â", "e3": "̃", "e8": "è", "e9": "é", "ea": "ê", "ec": "́", "ed": "í",
+    "f2": "ò", "f3": "̣", "f4": "ô", "f5": "õ", "f9": "ù", "fa": "ú", "fd": "ý",
+    "c0": "À", "c1": "Á", "c2": "Â", "c3": "Ã", "c8": "È", "c9": "É", "ca": "Ê", "cc": "̀", "cd": "Í",
+    "d2": "Ò", "d3": "Ó", "d4": "Ô", "d5": "Õ", "d9": "Ù", "da": "Ú", "dd": "Ý",
+    "e5": "ă", "c5": "Ă", "f1": "đ", "d1": "Đ", "eb": "̉", "ef": "ï", "f6": "ö", "fc": "ü"
+  };
+
+  cleaned = cleaned.replace(/\\'([0-9a-fA-F]{2})/g, (match, hexVal) => {
+    const hex = hexVal.toLowerCase();
+    if (win1258Map[hex]) return win1258Map[hex];
+    const charCode = parseInt(hex, 16);
+    if (charCode >= 32 && charCode <= 126) {
+      return String.fromCharCode(charCode);
+    }
+    return "";
+  });
+
+  // 5. Loại bỏ tất cả các lệnh RTF bắt đầu với \ còn sót lại
+  cleaned = cleaned.replace(/\\([a-z]+[0-9]*|-?[0-9]+)\s*/g, "");
+  cleaned = cleaned.replace(/\\(\*[a-z]+[0-9]*)\s*/g, "");
+
+  // 6. Xóa bỏ các cặp ngoặc nhọn định dạng RTF
+  cleaned = cleaned.replace(/[{}]/g, "");
+
+  // 7. Làm sạch các khoảng trắng và dòng thừa thụt lùi bất thường
+  return cleaned
+    .split("\n")
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .join("\n");
+}
+
+function parseXmlWordToText(xmlStr: string): string {
+  const tTags = xmlStr.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g);
+  if (tTags && tTags.length > 0) {
+    const textPieces = tTags.map(tag => {
+      const content = tag.replace(/<w:t[^>]*>([\s\S]*?)<\/w:t>/, "$1");
+      return content
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"');
+    });
+    return textPieces.join(" ");
+  }
+
+  let cleaned = xmlStr.replace(/<[^>]+>/g, "\n");
+  cleaned = cleaned
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"');
+    
+  return cleaned
+    .split("\n")
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .join("\n");
+}
+
 app.post("/api/parse-doc", async (req, res) => {
   try {
     const { base64, filename } = req.body;
@@ -312,35 +415,105 @@ app.post("/api/parse-doc", async (req, res) => {
     }
 
     const buffer = Buffer.from(base64, "base64");
-    const extractor = new WordExtractor();
-    const doc = await extractor.extract(buffer);
-    const text = doc.getBody();
+    
+    let text = "";
+    let html = "";
+    let orientation: "portrait" | "landscape" = "portrait";
 
-    // Phân tách văn bản theo các dòng để tạo cấu trúc paragraphs sạch sẽ
-    const paragraphs = text.split(/\r?\n/);
-    const htmlLines = paragraphs.map(p => {
-      const trimmed = p.trim();
-      if (!trimmed) {
-        return "";
+    // Kiểm tra chữ ký tệp tin (magic bytes)
+    const isDocx = buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4B && buffer[2] === 0x03 && buffer[3] === 0x04;
+    const isRtf = buffer.length >= 5 && buffer[0] === 0x7B && buffer[1] === 0x5C && buffer[2] === 0x72 && buffer[3] === 0x74 && buffer[4] === 0x66; // "{\rtf"
+    const isXml = buffer.length >= 5 && buffer[0] === 0x3C && buffer[1] === 0x3F && buffer[2] === 0x78 && buffer[3] === 0x6D && buffer[4] === 0x6C; // "<?xml"
+
+    if (isDocx) {
+      console.log("Phát hiện tệp tin là DOCX (ZIP) ẩn dưới đuôi định dạng .doc.");
+      const textResult = await mammoth.extractRawText({ buffer });
+      const htmlResult = await mammoth.convertToHtml({ buffer });
+      text = textResult.value;
+      html = htmlResult.value;
+    } else if (isRtf) {
+      console.log("Phát hiện tệp tin là RTF (Rich Text Format). Đang sử dụng bộ bóc tách RTF...");
+      const rawRtf = buffer.toString("utf-8");
+      text = parseRtfToText(rawRtf);
+      
+      const paragraphs = text.split(/\n+/);
+      const htmlLines = paragraphs.map(p => {
+        const trimmed = p.trim();
+        if (!trimmed) return "";
+        const escaped = trimmed
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+        return `<p class="text-justify">${escaped}</p>`;
+      }).filter(line => line !== "");
+      html = htmlLines.join("\n");
+    } else if (isXml) {
+      console.log("Phát hiện tệp tin là XML. Đang sử dụng bộ trích xuất Word XML...");
+      const rawXml = buffer.toString("utf-8");
+      text = parseXmlWordToText(rawXml);
+      
+      const paragraphs = text.split(/\n+/);
+      const htmlLines = paragraphs.map(p => {
+        const trimmed = p.trim();
+        if (!trimmed) return "";
+        const escaped = trimmed
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+        return `<p class="text-justify">${escaped}</p>`;
+      }).filter(line => line !== "");
+      html = htmlLines.join("\n");
+    } else {
+      // Thử bóc tách theo nguyên bản Word 97 - 2003 (.doc)
+      try {
+        console.log("Thử bóc tách bằng Word-Extractor tiêu chuẩn...");
+        const extractor = new WordExtractor();
+        const doc = await extractor.extract(buffer);
+        text = doc.getBody();
+
+        const paragraphs = text.split(/\r?\n/);
+        const htmlLines = paragraphs.map(p => {
+          const trimmed = p.trim();
+          if (!trimmed) return "";
+          const escaped = trimmed
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+          return `<p class="text-justify">${escaped}</p>`;
+        }).filter(line => line !== "");
+        html = htmlLines.join("\n");
+      } catch (extractorErr) {
+        console.warn("WordExtractor gốc thất bại, thử nạp dưới dạng Plain Text văn bản thô:", extractorErr);
+        const textStr = buffer.toString("utf-8");
+        const isBinary = /[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(textStr.slice(0, 500));
+        if (!isBinary) {
+          text = textStr;
+          const paragraphs = text.split(/\r?\n/);
+          const htmlLines = paragraphs.map(p => {
+            const trimmed = p.trim();
+            if (!trimmed) return "";
+            const escaped = trimmed
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+            return `<p class="text-justify">${escaped}</p>`;
+          }).filter(line => line !== "");
+          html = htmlLines.join("\n");
+        } else {
+          throw extractorErr;
+        }
       }
-      const escaped = trimmed
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-      return `<p class="text-justify">${escaped}</p>`;
-    }).filter(line => line !== "");
-
-    const html = htmlLines.join("\n");
+    }
 
     res.json({
       success: true,
       text,
       html,
-      orientation: "portrait"
+      orientation
     });
   } catch (error: any) {
     console.error("Lỗi khi giải mã tệp tin .doc:", error);
-    res.status(500).json({ error: "Giải nén tệp tin Word 97 - 2003 (.doc) thất bại. Vui lòng đảm bảo tệp tin không bị lỗi hoặc thử chuyển hướng lưu dạng .docx." });
+    res.status(500).json({ error: "Giải nén tệp tin Word 97 - 2003 (.doc) thất bại. Vui lòng đảm bảo tệp tin không bị lỗi hoặc thử chuyển đổi hướng lưu dạng .docx." });
   }
 });
 
@@ -375,12 +548,13 @@ app.post("/api/proofread", async (req, res) => {
         
         NHIỆM VỤ: Rà soát văn bản và trả về JSON Array các lỗi.
         
-        QUY ĐỊNH:
-        - Chế độ: ${mode} (NĐ 30: Nghị định 30/2020/NĐ-CP; HD 36: Hướng dẫn 36-HD/VPTW).
-        - Chính tả/Ngữ pháp: Sửa lỗi chính tả, viết hoa.
-        - Văn phong: Trang trọng, hành chính công vụ.
-        - Kiến thức tự học: ${knowledgeString}
-        - Lỗi Logic/Quy chuẩn: Sai cấp bậc (Bỏ huyện từ 01/7/2025).
+        QUY ĐỊNH PHÁP LÝ & KỸ THUẬT:
+        - Chế độ: ${mode} (Tập trung rà soát theo Nghị định 30/2020/NĐ-CP cho khối Cơ quan Nhà nước hoặc Hướng dẫn 36-HD/VPTW cho khối Văn phòng Đảng; đồng thời tuân thủ các quy tắc hiện đại tuyệt đối của Nghị định 150/2025/NĐ-CP về định dạng, liên thông dữ liệu, hồ sơ điện tử và ký số công vụ).
+        - Chính tả/Ngữ pháp: Sửa lỗi chính tả, sai chính tả địa danh, lỗi viết hoa sai quy chuẩn.
+        - Văn phong: Mang tính trang trọng, rõ nghĩa, hành chính công vụ thuần túy, tuyệt đối không dùng ngôn ngữ suồng sã.
+        - Hệ thống kiến thức tự học cập nhật từ người dùng chủ trì:
+        ${knowledgeString}
+        - Thước đo lỗi logic/Quy chuẩn: Bẫy các lỗi lỗi thời (ví dụ như quy định bỏ đơn vị cấp huyện cũ từ 01/7/2025, định danh cơ quan sai chuẩn...).
 
         ĐẦU RA (JSON Array): [{"text": "...", "error": "...", "suggestion": "...", "type": "..."}]
 
