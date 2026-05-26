@@ -15,25 +15,73 @@ const PORT = 3000;
 app.use(express.json({ limit: "50mb" }));
 
 const KNOWLEDGE_PATH = path.join(process.cwd(), "knowledge.json");
+const TMP_KNOWLEDGE_PATH = "/tmp/knowledge.json";
+
+let memoryKnowledge: any = null;
 
 async function ensureKnowledgeFile() {
+  if (memoryKnowledge) return;
+
+  // Thử đọc từ gốc
   try {
-    await fs.access(KNOWLEDGE_PATH);
+    const data = await fs.readFile(KNOWLEDGE_PATH, "utf-8");
+    if (data.trim()) {
+      memoryKnowledge = JSON.parse(data);
+      console.log("Successfully loaded knowledge from default root path.");
+      return;
+    }
   } catch {
-    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify({ learnedRules: [] }, null, 2));
+    // Không đọc được từ gốc, thử đọc từ /tmp
+    try {
+      const data = await fs.readFile(TMP_KNOWLEDGE_PATH, "utf-8");
+      if (data.trim()) {
+        memoryKnowledge = JSON.parse(data);
+        console.log("Successfully loaded knowledge from /tmp backup path.");
+        return;
+      }
+    } catch {
+      // Cả hai đều không có, tạo mới
+    }
+  }
+
+  memoryKnowledge = { learnedRules: [] };
+  
+  // Thử ghi khởi tạo vào root
+  try {
+    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(memoryKnowledge, null, 2));
+  } catch {
+    // Nếu rớt lỗi do read-only, thử ghi vào /tmp
+    try {
+      await fs.writeFile(TMP_KNOWLEDGE_PATH, JSON.stringify(memoryKnowledge, null, 2));
+    } catch (tmpErr) {
+      console.warn("Failed to write initial knowledge file to both root and /tmp. Running entirely in-memory.", tmpErr);
+    }
   }
 }
 
 async function readKnowledgeFile() {
+  if (!memoryKnowledge) {
+    await ensureKnowledgeFile();
+  }
+  return memoryKnowledge || { learnedRules: [] };
+}
+
+async function saveKnowledgeFile(data: any) {
+  memoryKnowledge = data;
+  
+  // 1. Thử ghi vào root
   try {
-    const data = await fs.readFile(KNOWLEDGE_PATH, "utf-8");
-    if (!data.trim()) {
-      return { learnedRules: [] };
-    }
-    return JSON.parse(data);
-  } catch (error) {
-    console.warn("Knowledge file corrupted or unreadable. Resetting to default dynamic rules context.", error);
-    return { learnedRules: [] };
+    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+    return;
+  } catch (rootErr) {
+    console.warn("Root filesystem is read-only (e.g. Vercel). Attempting to write to /tmp/knowledge.json instead.");
+  }
+
+  // 2. Thử ghi vào /tmp
+  try {
+    await fs.writeFile(TMP_KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+  } catch (tmpErr) {
+    console.warn("Could not save knowledge file to /tmp either. Updated data is stored in server runtime memory only.", tmpErr);
   }
 }
 
@@ -714,7 +762,7 @@ app.post("/api/learn", async (req, res) => {
       createdAt: new Date().toISOString()
     };
     data.learnedRules.push(newRule);
-    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+    await saveKnowledgeFile(data);
     res.json({ success: true, rule: newRule });
   } catch (error) {
     res.status(500).json({ error: "Learning failed" });
@@ -748,7 +796,7 @@ app.get("/api/learned-rules", async (req, res) => {
 
     if (modified) {
       data.learnedRules = structuredList;
-      await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+      await saveKnowledgeFile(data);
     }
 
     res.json({ success: true, learnedRules: structuredList });
@@ -778,7 +826,7 @@ app.post("/api/learned-rules", async (req, res) => {
     };
 
     data.learnedRules.push(newRule);
-    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+    await saveKnowledgeFile(data);
     res.json({ success: true, rule: newRule });
   } catch (error) {
     res.status(500).json({ error: "Không thể thêm quy trình tự học mới." });
@@ -807,7 +855,7 @@ app.put("/api/learned-rules/:id", async (req, res) => {
     };
 
     data.learnedRules = list;
-    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+    await saveKnowledgeFile(data);
     res.json({ success: true, rule: list[index] });
   } catch (error) {
     res.status(500).json({ error: "Cập nhật quy tắc thất bại." });
@@ -823,7 +871,7 @@ app.delete("/api/learned-rules/:id", async (req, res) => {
     const filtered = list.filter((r: any) => r && r.id !== id);
     data.learnedRules = filtered;
     
-    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+    await saveKnowledgeFile(data);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: "Xóa quy tắc thất bại." });
@@ -871,7 +919,7 @@ app.post("/api/analyze-and-learn", async (req, res) => {
       }
     }
 
-    await fs.writeFile(KNOWLEDGE_PATH, JSON.stringify(data, null, 2));
+    await saveKnowledgeFile(data);
     res.json({ success: true, addedRules });
   } catch (error: any) {
     console.error("Analysis learning failed:", error);
@@ -896,6 +944,12 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 async function startServer() {
   await ensureKnowledgeFile();
 
+  const isVercel = process.env.VERCEL === "1" || !!process.env.NOW_REGION;
+  if (isVercel) {
+    console.log("Detecting Vercel Serverless environment. Disabling client routing and listening listener.");
+    return;
+  }
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true, hmr: false },
@@ -916,3 +970,5 @@ async function startServer() {
 }
 
 startServer();
+
+export default app;
